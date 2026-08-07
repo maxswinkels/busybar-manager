@@ -196,8 +196,10 @@ function librarySummary(library, apps) {
 
 function createMockState() {
   return {
+    barMode: 'local',
     barHost: '10.0.4.20',
     tokenSet: false,
+    cloudTokenSet: false,
     listenPort: 8321,
     barReachable: true,
     screenOwner: { applicationName: 'flightradar', slug: 'flightradar', since: nowMs() - 42_000 },
@@ -537,11 +539,15 @@ export function managerMockPlugin() {
 
         if (p === '/api/_manager/settings' && req.method === 'PUT') {
           readJsonBody(req).then((body) => {
+            if (body.barMode === 'local' || body.barMode === 'cloud') state.barMode = body.barMode
             if (body.barHost) state.barHost = body.barHost
             if (body.appsDirs) state.appsDirs = body.appsDirs
             // Bar token: `""` clears it, any other string sets it. Never
             // echoed back — state only carries `tokenSet`.
             if (typeof body.token === 'string') state.tokenSet = body.token !== ''
+            // Cloud account token (barMode 'cloud'), same rule — only
+            // `cloudTokenSet` is echoed back.
+            if (typeof body.cloudToken === 'string') state.cloudTokenSet = body.cloudToken !== ''
             // Optional GitHub token (v3-aanvullingen): `""` clears it, any
             // other string sets it. Never echoed back — only `tokenSet`.
             if (typeof body.libraryToken === 'string') {

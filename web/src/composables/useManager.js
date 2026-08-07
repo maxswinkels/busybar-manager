@@ -3,8 +3,10 @@ import { reactive } from 'vue'
 // Global manager state, mirrored from the backend over SSE (GET /events).
 // Shape matches GET /api/_manager/state exactly (see docs/CONTRACT.md).
 export const manager = reactive({
+  barMode: 'local', // 'local' = LAN bar at barHost, 'cloud' = api.busy.app
   barHost: '',
   tokenSet: false, // whether a bar token is configured; the token itself is never sent to the frontend
+  cloudTokenSet: false, // same, for the cloud account token (a different secret)
   listenPort: 8321,
   barReachable: false,
   screenOwner: null, // { applicationName, slug, since } | null

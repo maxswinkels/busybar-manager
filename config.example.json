@@ -1,7 +1,9 @@
 {
   "listenPort": 8321,
+  "barMode": "local",
   "barHost": "10.0.4.20",
   "token": null,
+  "cloudToken": null,
   "appsDirs": [],
   "apps": {
     "clock": {

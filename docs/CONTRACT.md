@@ -4,9 +4,19 @@ The manager listens on **port 8321** (configurable). One port for everything: pr
 
 ## Proxy
 
-Everything under `/api/*` that does NOT start with `/api/_manager` and is not `/events` is forwarded 1-to-1 to `http://<barHost>` (default `10.0.4.20`). Method, query string, headers (minus hop-by-hop), body, and status code stay intact.
+Everything under `/api/*` that does NOT start with `/api/_manager` and is not `/events` is forwarded 1-to-1 to the bar. Method, query string, headers (minus hop-by-hop), body, and status code stay intact.
 
-Optional bar credential: `token` (string|null) at the top level of config. If set, every bar-bound request carries it as header `X-API-Token: <token>` the configured value overrides anything the caller sent. Exception: WebSocket upgrades (`/api/status/ws`) carry it as the `X-API-Token` **query parameter** instead, which is the only form the bar honours there. NEVER echo the token back in state/settings payloads.
+Two transports, selected by `barMode` (string, `"local"` | `"cloud"`, default `"local"`) at the top level of config:
+
+| | `local` (default) | `cloud` |
+|---|---|---|
+| upstream | `http://<barHost>` (default `10.0.4.20`) | `https://api.busy.app/busybar` (override with `BUSYBAR_CLOUD_API_BASE`) |
+| path | verbatim: `/api/<path>` | leading `/api` swapped for the base path: `/busybar/<path>` |
+| credential | `token` as header `X-API-Token: <token>` | `cloudToken` as header `Authorization: Bearer <cloudToken>` |
+
+Header handling differs per mode. `local` forwards the caller's headers 1-to-1 (minus hop-by-hop). `cloud` keeps only `content-type`, `content-length`, `accept`, `accept-encoding`, `accept-language` and the `sec-websocket-*` handshake headers, and sends `User-Agent: busybar-manager/<version>`: the request upstream is the manager's, not the app's, and api.busy.app is behind Cloudflare, which rejects forwarded script user-agents with `error code 1010`.
+
+`token` and `cloudToken` (both string|null) are **different secrets** — `token` is the bar's Wi-Fi token, `cloudToken` is the BUSY account token. Both stay stored when the mode is toggled. The configured value overrides anything the caller sent, and the credential for the inactive mode is stripped from forwarded requests. Exception, `local` mode only: WebSocket upgrades (`/api/status/ws`) carry `token` as the `X-API-Token` **query parameter** instead, which is the only form the bar honours there; in `cloud` mode the upgrade is server-to-server, so the `Authorization` header is used there too. NEVER echo either token back in state/settings payloads.
 
 Special case: `POST /api/display/draw`: the manager parses the JSON body:
 - records `application_name` (the payload also accepts `app_id`; support both) + response status;
@@ -22,8 +32,10 @@ Mapping application_name→slug: when an app starts, the supervisor remembers wh
 - `GET /api/_manager/state` →
 ```json
 {
+  "barMode": "local",
   "barHost": "10.0.4.20",
   "tokenSet": false,
+  "cloudTokenSet": false,
   "listenPort": 8321,
   "barReachable": true,
   "screenOwner": { "applicationName": "flightradar", "slug": "flightradar", "since": 1730000000000 },
@@ -55,7 +67,7 @@ Mapping application_name→slug: when an app starts, the supervisor remembers wh
 - `PUT /api/_manager/apps/:slug/variations/:name` body `{ "args": {"--brightness": "50"}, "env": {"API_KEY": "x"}, "priority": 40 }`: create/overwrite (persist).
 - `DELETE /api/_manager/apps/:slug/variations/:name` (the selected one and "default" must not be removed if it is the last one; when the selected one is removed, the selection falls back to "default").
 - `GET /api/_manager/apps/:slug/log` → `{ "lines": ["…"] }` (the last ±500 lines, stdout+stderr merged with a prefix).
-- `PUT /api/_manager/settings` body `{ "barHost"?, "token"?, "appsDirs"? }` (persist; changing barHost reconnects the mirror and the proxy target). `token`: `""` clears it, any other string sets it, omitting the key leaves the stored token untouched — the frontend never receives the token back, so a blank input field means "keep".
+- `PUT /api/_manager/settings` body `{ "barMode"?, "barHost"?, "token"?, "cloudToken"?, "appsDirs"? }` (persist; changing barMode or barHost reconnects the mirror and the proxy target). `barMode` must be `"local"` or `"cloud"` (400 otherwise). `token` / `cloudToken`: `""` clears it, any other string sets it, omitting the key leaves the stored token untouched — the frontend never receives either token back, so a blank input field means "keep".
 - `GET /api/_manager/health` → `{ "ok": true }`
 
 Errors: `{ "error": "…" }` with an appropriate 4xx/5xx.
@@ -70,7 +82,7 @@ Same pattern as busybar-emulator. Events:
 
 ## Bar passthrough `/api/_bar/*` (for the emulator mirror)
 
-`GET /api/_bar/<path>` forwards streaming (pipe, no buffering: SSE must work) to `http://<barHost>/<path>`. GET only; the query is passed through; 502 when the bar is unreachable. It exists because `/events` on the manager is already taken by its own SSE, and the emulator mirror needs `GET <emulator>/events` + asset paths (`/animations/*`, `/public/*`) same-origin.
+`GET /api/_bar/<path>` forwards streaming (pipe, no buffering: SSE must work) to `http://<barHost>/<path>` (in `cloud` mode: `<cloud base>/<path>`). GET only; the query is passed through; 502 when the bar is unreachable. It exists because `/events` on the manager is already taken by its own SSE, and the emulator mirror needs `GET <emulator>/events` + asset paths (`/animations/*`, `/public/*`) same-origin.
 
 ## Mirror (frontend)
 
@@ -85,8 +97,10 @@ Source order: (1) firmware ws, (2) `/api/screen` polling (the real bar), (3) **e
 ```json
 {
   "listenPort": 8321,
+  "barMode": "local",
   "barHost": "10.0.4.20",
   "token": null,
+  "cloudToken": null,
   "appsDirs": ["/Users/maxswinkels/Developer/busybar-apps/apps"],
   "apps": {
     "clock": {

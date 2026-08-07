@@ -8,12 +8,14 @@
  * spec this file implements.
  */
 const http = require("http");
+const https = require("https");
 const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
 const zlib = require("zlib");
 const { spawn, spawnSync } = require("child_process");
 
+const PKG = require("./package.json");
 const PYTHON = process.env.BUSYBAR_PYTHON || "python3";
 const ROOT = __dirname;
 const WEB_DIST = path.join(ROOT, "web", "dist");
@@ -25,6 +27,13 @@ function libraryApiBase() {
 }
 function libraryRawBase() {
   return process.env.BUSYBAR_LIBRARY_RAW_BASE || "https://raw.githubusercontent.com";
+}
+// Cloud transport (config.barMode === "cloud"): the bar is reached through
+// BUSY's hosted API instead of over the LAN. Same paths, different root —
+// `/api/<path>` becomes `<base>/<path>` — and a different credential
+// (config.cloudToken, an account token, NOT the Wi-Fi bar token).
+function cloudApiBase() {
+  return process.env.BUSYBAR_CLOUD_API_BASE || "https://api.busy.app/busybar";
 }
 
 function log(...args) {
@@ -68,7 +77,10 @@ function normalizeLibrary(rawLib) {
 }
 
 function defaultConfig() {
-  return { listenPort: 8321, barHost: "10.0.4.20", token: null, appsDirs: [], apps: {}, library: normalizeLibrary(undefined) };
+  return {
+    listenPort: 8321, barMode: "local", barHost: "10.0.4.20", token: null,
+    cloudToken: null, appsDirs: [], apps: {}, library: normalizeLibrary(undefined),
+  };
 }
 
 function defaultVariation() {
@@ -86,8 +98,10 @@ function defaultAppConfig() {
 function normalizeConfig(raw) {
   const cfg = Object.assign(defaultConfig(), raw && typeof raw === "object" ? raw : {});
   if (typeof cfg.listenPort !== "number") cfg.listenPort = 8321;
+  if (cfg.barMode !== "cloud") cfg.barMode = "local";
   if (typeof cfg.barHost !== "string" || !cfg.barHost) cfg.barHost = "10.0.4.20";
   cfg.token = typeof cfg.token === "string" && cfg.token ? cfg.token : null;
+  cfg.cloudToken = typeof cfg.cloudToken === "string" && cfg.cloudToken ? cfg.cloudToken : null;
   if (!Array.isArray(cfg.appsDirs)) cfg.appsDirs = [];
   if (!cfg.apps || typeof cfg.apps !== "object") cfg.apps = {};
   cfg.library = normalizeLibrary(raw && raw.library);
@@ -693,11 +707,56 @@ function parseHostPort(raw) {
   return { hostname: s, port: 80 };
 }
 
-// Optional bar credential (config.token). When set it rides along on every
-// bar-bound request as the `X-API-Token` header (the only form the bar
-// honours). Applied after filterHeaders(), so the configured value always
-// wins over anything the caller sent.
-function withBarToken(headers) {
+function cloudMode() {
+  return config.barMode === "cloud";
+}
+
+// Resolve a manager-side bar path into the concrete upstream request. In
+// `local` mode that is the LAN bar verbatim over http; in `cloud` mode the
+// leading `/api` is swapped for the cloud base path (`/busybar`) and the
+// request goes out over https to api.busy.app.
+function barUpstream(urlPath) {
+  if (cloudMode()) {
+    const base = new URL(cloudApiBase());
+    const rest = urlPath.startsWith("/api/") ? urlPath.slice("/api".length) : urlPath;
+    const port = base.port ? Number(base.port) : base.protocol === "http:" ? 80 : 443;
+    return {
+      transport: base.protocol === "http:" ? http : https,
+      hostname: base.hostname,
+      port,
+      path: base.pathname.replace(/\/+$/, "") + rest,
+      origin: base.origin,
+    };
+  }
+  const t = parseHostPort(config.barHost);
+  return { transport: http, hostname: t.hostname, port: t.port, path: urlPath, origin: `http://${t.hostname}:${t.port}` };
+}
+
+function barTargetLabel() {
+  return cloudMode() ? cloudApiBase() : barUpstream("/").origin;
+}
+
+function dropHeader(headers, lowerName) {
+  for (const k of Object.keys(headers)) {
+    if (k.toLowerCase() === lowerName) delete headers[k];
+  }
+}
+
+// Optional bar credential. In `local` mode that's config.token, riding along
+// on every bar-bound request as the `X-API-Token` header (the only form the
+// bar honours). In `cloud` mode it's config.cloudToken — a different secret —
+// sent as `Authorization: Bearer <token>`. The configured value always wins
+// over anything the caller sent.
+function withBarAuth(headers) {
+  // Case-insensitive: inbound req.headers keys are always lowercased by node,
+  // while the ones set below are not — deleting only one casing would leave a
+  // caller-sent credential in place and send *two* auth headers upstream.
+  dropHeader(headers, "authorization");
+  dropHeader(headers, "x-api-token");
+  if (cloudMode()) {
+    if (config.cloudToken) headers["Authorization"] = `Bearer ${config.cloudToken}`;
+    return headers;
+  }
   if (config.token) headers["X-API-Token"] = config.token;
   return headers;
 }
@@ -711,14 +770,43 @@ function filterHeaders(headers) {
   return out;
 }
 
+/*
+ * Cloudflare protection against api.busy.app
+ *
+ * Script-like User-Agent headers (e.g. Python-urllib/3.14) are rejected with
+ * error 1010.
+ * Thus remove all unnecessary headers and set a proper User-Agent for the manager.
+ */
+const MANAGER_UA = `busybar-manager/${PKG.version} (+https://github.com/maxswinkels/busybar-manager)`;
+const CLOUD_KEEP_HEADERS = new Set([
+  "content-type", "content-length", "accept", "accept-encoding", "accept-language",
+  // ws handshake — dropping these turns the upgrade into a plain GET
+  "sec-websocket-key", "sec-websocket-version", "sec-websocket-protocol", "sec-websocket-extensions",
+]);
+function scrubForCloud(headers) {
+  const out = {};
+  for (const [k, v] of Object.entries(headers)) {
+    if (CLOUD_KEEP_HEADERS.has(k.toLowerCase())) out[k] = v;
+  }
+  out["User-Agent"] = MANAGER_UA;
+  return out;
+}
+
+// The one place bar-bound headers are built: hop-by-hop stripped, scrubbed for
+// the cloud when that's the transport, then the configured credential applied.
+function barHeaders(reqHeaders) {
+  const filtered = filterHeaders(reqHeaders);
+  return withBarAuth(cloudMode() ? scrubForCloud(filtered) : filtered);
+}
+
 function forwardToBar(method, urlPath, reqHeaders, body) {
   return new Promise((resolve) => {
-    const target = parseHostPort(config.barHost);
-    const headers = withBarToken(filterHeaders(reqHeaders));
+    const up = barUpstream(urlPath);
+    const headers = barHeaders(reqHeaders);
     if (body && body.length) headers["content-length"] = String(body.length);
     else delete headers["content-length"];
-    const options = { hostname: target.hostname, port: target.port, path: urlPath, method, headers, timeout: 10000 };
-    const proxyReq = http.request(options, (proxyRes) => {
+    const options = { hostname: up.hostname, port: up.port, path: up.path, method, headers, timeout: 10000 };
+    const proxyReq = up.transport.request(options, (proxyRes) => {
       const chunks = [];
       proxyRes.on("data", (c) => chunks.push(c));
       proxyRes.on("end", () => {
@@ -735,13 +823,10 @@ function forwardToBar(method, urlPath, reqHeaders, body) {
 
 function sendDisplayClear(appName) {
   return new Promise((resolve) => {
-    const target = parseHostPort(config.barHost);
-    const options = {
-      hostname: target.hostname, port: target.port,
-      path: `/api/display/draw?application_name=${encodeURIComponent(appName)}`,
-      method: "DELETE", headers: withBarToken({}), timeout: 5000,
-    };
-    const r = http.request(options, (resp) => {
+    const up = barUpstream(`/api/display/draw?application_name=${encodeURIComponent(appName)}`);
+    const headers = barHeaders({});
+    const options = { hostname: up.hostname, port: up.port, path: up.path, method: "DELETE", headers, timeout: 5000 };
+    const r = up.transport.request(options, (resp) => {
       resp.resume();
       resp.on("end", () => resolve(resp.statusCode));
     });
@@ -818,13 +903,12 @@ function handleBarPassthrough(req, res, p) {
   if (req.method !== "GET") {
     return sendJSON(res, 405, { error: "only GET is supported for /api/_bar/*" });
   }
-  const target = parseHostPort(config.barHost);
-  const upstreamPath = req.url.slice("/api/_bar".length) || "/";
-  const headers = withBarToken(filterHeaders(req.headers));
+  const up = barUpstream(req.url.slice("/api/_bar".length) || "/");
+  const headers = barHeaders(req.headers);
   delete headers["content-length"];
 
   // No `timeout` option: the socket must stay open indefinitely for SSE.
-  const proxyReq = http.request({ hostname: target.hostname, port: target.port, path: upstreamPath, method: "GET", headers }, (proxyRes) => {
+  const proxyReq = up.transport.request({ hostname: up.hostname, port: up.port, path: up.path, method: "GET", headers }, (proxyRes) => {
     if (res.writableEnded) {
       proxyRes.resume();
       return;
@@ -875,21 +959,25 @@ function handleUpgrade(req, socket, head) {
     socket.end("HTTP/1.1 404 Not Found\r\n\r\n");
     return;
   }
-  const target = parseHostPort(config.barHost);
-  if (config.token) u.searchParams.set("X-API-Token", config.token);
+  // Local mode only: the firmware accepts the credential on a ws upgrade as a
+  // query parameter. The cloud API takes the Authorization header instead
+  // (withBarAuth below) — this hop is server-to-server, so the header is fine.
+  if (!cloudMode() && config.token) u.searchParams.set("X-API-Token", config.token);
+  const up = barUpstream(u.pathname + u.search);
   // filterHeaders() drops the hop-by-hop handshake headers; the ws-specific
   // ones (sec-websocket-key/version/protocol/extensions) survive and must.
-  const headers = withBarToken(filterHeaders(req.headers));
+  const headers = barHeaders(req.headers);
   delete headers["content-length"];
-  headers.host = `${target.hostname}:${target.port}`;
+  headers.host = up.port === 80 || up.port === 443 ? up.hostname : `${up.hostname}:${up.port}`;
   headers.connection = "Upgrade";
   headers.upgrade = req.headers.upgrade || "websocket";
+  if (cloudMode()) headers.origin = `https://${up.hostname}`;
 
   // No `timeout`: the tunnel stays open for as long as the stream lasts.
-  const proxyReq = http.request({
-    hostname: target.hostname,
-    port: target.port,
-    path: u.pathname + u.search,
+  const proxyReq = up.transport.request({
+    hostname: up.hostname,
+    port: up.port,
+    path: up.path,
     method: req.method,
     headers,
   });
@@ -925,14 +1013,14 @@ function handleUpgrade(req, socket, head) {
 let barReachable = false;
 async function checkBarReachable() {
   try {
-    const target = parseHostPort(config.barHost);
+    const up = barUpstream("/api/version");
     const controller = new AbortController();
     const t = setTimeout(() => controller.abort(), 3000);
     let ok = false;
     try {
-      const resp = await fetch(`http://${target.hostname}:${target.port}/api/version`, {
+      const resp = await fetch(`${up.origin}${up.path}`, {
         signal: controller.signal,
-        headers: withBarToken({}),
+        headers: barHeaders({}),
       });
       ok = resp.ok;
     } finally {
@@ -1514,8 +1602,10 @@ function buildState() {
     });
   }
   return {
+    barMode: config.barMode,
     barHost: config.barHost,
     tokenSet: !!config.token,
+    cloudTokenSet: !!config.cloudToken,
     listenPort: getListenPort(),
     barReachable,
     screenOwner: currentScreenOwner(),
@@ -1648,6 +1738,16 @@ function apiLog(slug, res) {
 
 function apiSettings(body, res) {
   let changed = false;
+  // Transport for every bar-bound request: "local" (LAN, barHost + token) or
+  // "cloud" (api.busy.app, cloudToken). Both credentials stay stored, so
+  // toggling back and forth doesn't lose either one.
+  if (body.barMode !== undefined) {
+    if (body.barMode !== "local" && body.barMode !== "cloud") {
+      return sendJSON(res, 400, { error: 'barMode must be "local" or "cloud"' });
+    }
+    config.barMode = body.barMode;
+    changed = true;
+  }
   if (body.barHost !== undefined) {
     if (typeof body.barHost !== "string" || !body.barHost) return sendJSON(res, 400, { error: "barHost must be a non-empty string" });
     config.barHost = body.barHost;
@@ -1658,6 +1758,12 @@ function apiSettings(body, res) {
   if (body.token !== undefined) {
     if (typeof body.token !== "string") return sendJSON(res, 400, { error: "token must be a string" });
     config.token = body.token ? body.token : null;
+    changed = true;
+  }
+  // Cloud account token — same "" clears / omit keeps rule, never echoed back.
+  if (body.cloudToken !== undefined) {
+    if (typeof body.cloudToken !== "string") return sendJSON(res, 400, { error: "cloudToken must be a string" });
+    config.cloudToken = body.cloudToken ? body.cloudToken : null;
     changed = true;
   }
   if (body.appsDirs !== undefined) {
@@ -2025,7 +2131,7 @@ async function main() {
   // (e.g. "0.0.0.0") to expose it deliberately.
   const bindHost = typeof config.bindHost === "string" && config.bindHost ? config.bindHost : "127.0.0.1";
   server.listen(port, bindHost, () => {
-    log(`busybar-manager listening on ${bindHost}:${port} (bar=${config.barHost}, appsDirs=${JSON.stringify(config.appsDirs)})`);
+    log(`busybar-manager listening on ${bindHost}:${port} (bar=${barTargetLabel()}, appsDirs=${JSON.stringify(config.appsDirs)})`);
   });
 
   checkBarReachable();

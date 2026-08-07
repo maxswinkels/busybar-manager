@@ -4,9 +4,18 @@
       <div class="h-left">
         <span class="logo" v-html="logoSvg"></span>
         <span class="conn">
-          <span class="ci" :class="{ warn: !manager.barReachable }" v-html="manager.barReachable ? icons.usb : icons.alert"></span>
+          <span class="ci" :class="{ warn: !manager.barReachable }" v-html="connIcon"></span>
           {{ manager.barReachable ? 'Connected' : 'Disconnected' }}
-          <span class="host">{{ manager.barHost || '—' }}</span>
+          <span class="host">{{ connTarget }}</span>
+          <button
+            v-if="configWarning"
+            type="button"
+            class="conn-warn"
+            :title="`${configWarning} — open Settings`"
+            @click="activeTab = 'settings'"
+          >
+            <span v-html="icons.alert"></span>{{ configWarning }}
+          </button>
         </span>
       </div>
       <div class="h-center">BUSY Bar Manager</div>
@@ -88,6 +97,27 @@ const activeTab = ref(tabFromUrl())
 if (location.hash) history.replaceState(null, '', '/' + activeTab.value)
 watch(activeTab, (v) => { if (location.pathname !== '/' + v) history.pushState(null, '', '/' + v) })
 window.addEventListener('popstate', () => { activeTab.value = tabFromUrl() })
+
+// Header connection chip. In cloud mode the bar's IP is meaningless (traffic
+// goes to api.busy.app), so the chip names the transport instead of the host.
+const cloudMode = computed(() => manager.barMode === 'cloud')
+const connIcon = computed(() => {
+  if (!manager.barReachable) return icons.alert
+  return cloudMode.value ? icons.cloud : icons.usb
+})
+const connTarget = computed(() => (cloudMode.value ? 'BUSY cloud' : manager.barHost || '—'))
+
+// Credential mistakes the manager can spot without waiting for a request to
+// fail: the cloud transport needs a cloud token, and a bar on Wi-Fi (i.e. any
+// host other than the fixed USB address) needs a bar token. Rendered as a
+// click-through to Settings rather than a passive warning.
+const USB_HOST = '10.0.4.20'
+const configWarning = computed(() => {
+  if (cloudMode.value) return manager.cloudTokenSet ? '' : 'Cloud token required'
+  const host = (manager.barHost || '').trim()
+  if (!host || host === USB_HOST || host.startsWith(`${USB_HOST}:`)) return ''
+  return manager.tokenSet ? '' : 'Bar token required'
+})
 
 const variationSlug = ref(null)
 const logsSlug = ref(null)

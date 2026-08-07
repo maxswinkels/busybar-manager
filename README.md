@@ -199,7 +199,10 @@ Settings live in `config.json` (atomic writes; changes from the dashboard persis
 ```
 
 - `listenPort` — port the manager listens on (default 8321).
-- `barHost` — IP or `host:port` of the bar (default `10.0.4.20`; use `127.0.0.1:8080` for the emulator).
+- `barMode` — `"local"` (default) talks to the bar on your network; `"cloud"` routes every bar request through `https://api.busy.app/busybar/…` instead, so the bar doesn't have to be reachable from this machine.
+- `barHost` — IP or `host:port` of the bar, `barMode: "local"` only (default `10.0.4.20`; use `127.0.0.1:8080` for the emulator).
+- `token` — the bar's Wi-Fi token, sent as `X-API-Token` in local mode.
+- `cloudToken` — your BUSY account token, sent as `Authorization: Bearer` in cloud mode. Create one at [cloud.busy.app/api-tokens](https://cloud.busy.app/api-tokens). Different secret from `token`; both are kept when you switch modes.
 - `appsDirs` — folders of local apps in development (default empty).
 - `library.repos[]` — GitHub repos to install from (`repo`, `branch`); `library.checkIntervalHours` sets the update-check cadence.
 - `apps.<slug>` — per app: `enabled`, the selected `variation`, and named `variations` (`args`, `env`, optional `priority` 1–100).

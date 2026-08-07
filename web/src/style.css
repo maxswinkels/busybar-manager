@@ -55,6 +55,10 @@ button{font-family:inherit}
 .conn .ci svg{width:18px;height:18px}
 .conn .ci.warn{color:var(--warn)}
 .conn .host{color:var(--muted);font-size:14px}
+/* misconfigured-credential chip in the header — a button, it opens Settings */
+.conn-warn{cursor:pointer;border:none;font-family:var(--font);display:inline-flex;align-items:center;gap:6px;padding:4px 11px;border-radius:999px;font-size:12.5px;font-weight:500;background:color-mix(in srgb,var(--warn) 16%,transparent);color:var(--warn);transition:.15s}
+.conn-warn:hover{background:color-mix(in srgb,var(--warn) 26%,transparent)}
+.conn-warn svg{width:14px;height:14px;display:block}
 @media(max-width:720px){.conn,.h-center{display:none}}
 /* battery indicator — icons + opacity layering match the firmware's
    BatteryIndicator 1:1 (shell/pin at 0.3, charge level at 0.2). Do NOT force
@@ -215,6 +219,8 @@ main{display:flex;flex-direction:column;gap:16px;width:100%;max-width:688px;marg
 .field{display:flex;flex-direction:column;gap:6px;margin-bottom:14px}
 .field label{font-size:12px;color:var(--muted);font-weight:500}
 .field .hint,.hint{font-size:11.5px;color:var(--faint)}
+.hint a{color:var(--brand);text-decoration:none}
+.hint a:hover{text-decoration:underline}
 input[type=text],input[type=number],input[type=password],textarea{background:var(--btn);border:1px solid transparent;color:var(--text);border-radius:10px;padding:9px 12px;font-family:var(--font);font-size:13.5px;width:100%}
 input[type=text]:focus,input[type=number]:focus,input[type=password]:focus,textarea:focus,select:focus{outline:none;box-shadow:0 0 0 2px var(--brand)}
 input[type=checkbox]{width:16px;height:16px;accent-color:var(--brand)}
@@ -229,6 +235,11 @@ input[type=checkbox]{width:16px;height:16px;accent-color:var(--brand)}
 /* settings tab section */
 .row-block{background:var(--row-bg);border-radius:12px;padding:16px;display:flex;flex-direction:column;gap:14px}
 .settings-foot{display:flex;justify-content:flex-end;padding-top:4px}
+/* segmented control (local bar vs BUSY cloud) */
+.seg{display:flex;gap:4px;padding:3px;border-radius:999px;background:var(--btn);align-self:flex-start;max-width:100%;overflow-x:auto}
+.seg-btn{flex:1;cursor:pointer;border:none;background:transparent;color:var(--muted);font-family:var(--font);font-size:13px;font-weight:500;padding:7px 16px;border-radius:999px;white-space:nowrap;transition:.15s}
+.seg-btn:hover{color:var(--text)}
+.seg-btn.active{background:var(--elevated);color:var(--text);box-shadow:inset 0 1px 1px 0 var(--ring-in),0 0 0 1px var(--ring-out)}
 
 /* app output terminal — always dark, regardless of theme (used for the logs modal) */
 .term{background:#0c0e12;border-radius:20px;overflow:hidden;box-shadow:inset 0 1px 1px rgba(255,255,255,.05),0 0 0 1px rgba(255,255,255,.08),0 18px 40px -28px rgba(0,0,0,.6)}

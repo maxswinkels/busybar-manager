@@ -9,7 +9,21 @@ const useMock = process.env.VITE_MANAGER_MOCK !== '0'
 export default defineConfig({
   plugins: [vue(), ...(useMock ? [managerMockPlugin()] : [])],
   base: '/',
-  build: { outDir: 'dist', assetsDir: 'static', emptyOutDir: true },
+  // Stable, unhashed bundle names: dist/ is committed, and content hashes would
+  // add a new file plus an index.html rewrite on every build. The manager sends
+  // no-cache for /static/, so the browser revalidates instead of cache-busting.
+  build: {
+    outDir: 'dist',
+    assetsDir: 'static',
+    emptyOutDir: true,
+    rollupOptions: {
+      output: {
+        entryFileNames: 'static/[name].js',
+        chunkFileNames: 'static/[name].js',
+        assetFileNames: 'static/[name][extname]',
+      },
+    },
+  },
   server: {
     proxy: useMock
       ? {}

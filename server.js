@@ -2050,13 +2050,16 @@ function handleStatic(req, res, p) {
     if (err) {
       fs.readFile(path.join(WEB_DIST, "index.html"), (err2, data2) => {
         if (err2) return sendJSON(res, 404, { error: "not found" });
-        res.writeHead(200, Object.assign({ "Content-Type": "text/html; charset=utf-8" }, CORS));
+        res.writeHead(200, Object.assign({ "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-cache" }, CORS));
         res.end(data2);
       });
       return;
     }
     const ext = path.extname(filePath);
-    res.writeHead(200, Object.assign({ "Content-Type": MIME[ext] || "application/octet-stream" }, CORS));
+    // Bundle names carry no content hash (see web/vite.config.js), so the
+    // browser must revalidate the entry points rather than reuse a stale copy.
+    // Everything else (brand art, fonts) keeps its name only when it changes.
+    res.writeHead(200, Object.assign({ "Content-Type": MIME[ext] || "application/octet-stream", "Cache-Control": "no-cache" }, CORS));
     res.end(data);
   });
 }

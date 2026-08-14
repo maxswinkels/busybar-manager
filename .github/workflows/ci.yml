@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  # web/dist is a build artifact that lives in git: the server serves it
+  # verbatim (WEB_DIST in server.js) and neither `npm start`, scripts/install.sh
+  # nor the LaunchAgent ever builds it. So a PR that edits web/src without
+  # running `npm run build` ships a dashboard that silently lags behind the
+  # server. That has happened on most frontend PRs so far, most recently with
+  # the Schedule tab, which the server supported while the bundle knew nothing
+  # about it. This job rebuilds and fails if the committed bundle differs.
+  #
+  # Safe as a byte comparison: bundle names are stable (no content hashes, see
+  # #5) and the output is identical across Node 22 and 24.
+  dist-up-to-date:
+    name: web/dist matches web/src
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install frontend dependencies
+        working-directory: web
+        run: npm ci
+
+      - name: Build the dashboard
+        working-directory: web
+        run: npm run build
+
+      - name: Check the committed bundle is up to date
+        run: |
+          if git diff --quiet -- web/dist; then
+            echo "web/dist is up to date."
+            exit 0
+          fi
+          echo "::error::web/dist is stale. Run 'cd web && npm run build' and commit the result."
+          git diff --stat -- web/dist
+          exit 1

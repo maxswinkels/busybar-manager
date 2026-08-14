@@ -49,6 +49,7 @@ Per installed app: `<projectroot>/apps/<slug>/.busybar-library.json`:
 ```
 - Runtime files + `manifest.yaml` are installed; `preview.*`, `__pycache__`, `.venv` are not (the UI shows previews via a raw URL).
 - The scanner ignores `.busybar-library.json` and may mark an app directory with a stamp as `source: "library"`.
+- The `files` sha map is also the primary duplicate signal (CONTRACT.md "Cleanup"): two slugs with the same `repo` and an identical map are the same app installed twice. Library stamps carry **git blob shas** and upload stamps carry **sha256**, so the two are never compared with each other. An empty/missing map is never a match — otherwise every stampless app would collide with every other one.
 
 ## GitHub access (server, zero-dep, global fetch)
 
@@ -65,7 +66,7 @@ Per installed app: `<projectroot>/apps/<slug>/.busybar-library.json`:
 - `POST /api/_manager/library/check` → same payload, forces a check.
 - `POST /api/_manager/library/install` body `{ "slug" }` → installs at the last checked commit; the app appears disabled in state (Max enables it himself). 409 if the slug already exists locally (appsDirs), 404 if unknown in the catalog.
 - `POST /api/_manager/library/update` body `{ "slug" }` → reinstalls files at the newest commit; if the app was running, it is automatically restarted afterward. Config/variations remain untouched. The per-app `.venv` is removed if `requirements.txt` changed (the sha stamp does the rest).
-- `POST /api/_manager/library/uninstall` body `{ "slug" }` → stops the app if necessary, removes `<projectroot>/apps/<slug>/` and the config entry. Only allowed for apps with a library stamp.
+- `POST /api/_manager/library/uninstall` body `{ "slug" }` → stops the app if necessary, removes `<projectroot>/apps/<slug>/` and the config entry. Only allowed for apps with a library stamp. Superseded by `DELETE /api/_manager/apps/:slug` (CONTRACT.md), which does the same thing without requiring a stamp and therefore also handles config-only orphans and manually dropped folders; kept for compatibility.
 - `GET /api/_manager/state` additions: per app `"source": "library"|"local"`, `"updateAvailable": bool`; top-level `"library": { "lastCheck", "updatesAvailable": <count>, "error" }`.
 - SSE `state` events contain the additions; after a check that changes something, state is pushed.
 
@@ -82,3 +83,4 @@ Per installed app: `<projectroot>/apps/<slug>/.busybar-library.json`:
 - Atomic writes: first to `apps/.staging-<slug>-<ts>/`, then rename over the target directory (move the old directory to `.trash-<ts>` first and clean it up); a half-successful download must never wreck a working app.
 - Removed-app config: on uninstall the config entry disappears (so variations too), that is fine.
 - `missing: true` apps from config that exist in the catalog → the UI does not show them twice; install restores them.
+- An install that lands the same upstream app under a **second** slug (because the repo renamed its folder) does not auto-replace the old copy — silently deleting an app the user did not mention, during an "Install" click, is exactly the surprise cleanup exists to undo. It surfaces as a detected duplicate instead (CONTRACT.md "Cleanup"), and the frontend refetches the cleanup report right after an install so the badge appears immediately.

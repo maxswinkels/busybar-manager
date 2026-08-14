@@ -401,3 +401,16 @@ input[type=checkbox]{width:16px;height:16px;accent-color:var(--brand)}
 .upload-drop.busy{cursor:default;opacity:.7}
 .upload-drop input[type=file]{position:absolute;inset:0;opacity:0;cursor:pointer}
 .upload-drop input[type=file]:disabled{cursor:default}
+
+/* cleanup panel (Apps tab) — stale config entries + duplicate installs */
+.cleanup-panel{margin-bottom:10px}
+.cleanup-group{display:flex;flex-direction:column;gap:6px}
+.cleanup-group + .cleanup-group{margin-top:12px;padding-top:12px;border-top:1px solid var(--track)}
+.cleanup-group-title{font-size:12.5px;font-weight:600;display:flex;flex-wrap:wrap;align-items:baseline;gap:6px}
+.cleanup-group-title .rb-hint{font-weight:400}
+.cleanup-item{display:flex;flex-wrap:wrap;align-items:center;gap:9px;padding:5px 0;font-size:13px}
+.cleanup-item.review{opacity:.6}
+.cleanup-slug{font-family:var(--mono);font-size:12.5px}
+.cleanup-arrow{color:var(--muted);font-size:12.5px}
+.cleanup-detail{display:flex;flex-wrap:wrap;gap:5px}
+.cleanup-foot{display:flex;justify-content:flex-end;gap:10px;padding-top:4px}

@@ -1,4 +1,4 @@
-import { reactive } from 'vue'
+import { computed, reactive, watch } from 'vue'
 
 // Global manager state, mirrored from the backend over SSE (GET /events).
 // Shape matches GET /api/_manager/state exactly (see docs/CONTRACT.md).
@@ -125,6 +125,68 @@ export async function updateSettings(patch) {
   return r
 }
 
+/* --------------------------- stale / duplicate apps ------------------------ */
+
+// Cleanup report, shape matches GET /api/_manager/cleanup exactly (see
+// docs/CONTRACT.md "Cleanup"). NOT pushed over SSE — the server keeps it out of
+// the state payload because detecting duplicates costs a stamp read per app,
+// same split as the library catalog. Refetched whenever the set of app slugs
+// changes, which is the only way a duplicate or orphan can appear.
+export const cleanup = reactive({
+  orphans: [],
+  duplicates: [],
+  removable: [],
+  counts: { orphans: 0, duplicateGroups: 0, removable: 0 },
+  loading: false,
+  loaded: false,
+})
+
+export async function fetchCleanup() {
+  cleanup.loading = true
+  const r = await apiJson('GET', '/api/_manager/cleanup')
+  cleanup.loading = false
+  if (r.ok) {
+    Object.assign(cleanup, r.json)
+    cleanup.loaded = true
+  }
+  return r
+}
+
+// Remove one app: stops it, deletes its managed folder (never an appsDirs
+// folder — the server enforces that) and drops its config entry. Unlike
+// uninstallApp this needs no library stamp, so it also covers orphans,
+// uploads and manually dropped folders.
+export async function removeApp(slug) {
+  const r = await apiJson('DELETE', `/api/_manager/apps/${encodeURIComponent(slug)}`)
+  if (r.ok) {
+    applyState(r.json)
+    await fetchCleanup()
+  }
+  return r
+}
+
+// Batch removal. Sends back exactly the slugs the panel rendered; the server
+// re-validates each against its own current report and skips anything that is
+// no longer stale, so a stale tab can never widen the delete.
+export async function runCleanup(slugs, migrateVariations = true) {
+  const r = await apiJson('POST', '/api/_manager/cleanup', { slugs, migrateVariations })
+  if (r.ok) {
+    if (r.json.state) applyState(r.json.state)
+    await fetchCleanup()
+  }
+  return r
+}
+
+const slugKey = computed(() =>
+  manager.apps
+    .map((a) => a.slug)
+    .sort()
+    .join('|')
+)
+watch(slugKey, () => {
+  fetchCleanup()
+})
+
 /* ---------------------------- remote control ------------------------------- */
 
 // Single key press on the bar (openapi.yaml: POST /api/input?key=…). Goes out
@@ -155,9 +217,12 @@ export async function checkLibrary() {
 // `repo` is required by the backend only when `slug` collides across linked
 // repos, but it's harmless (and correct) to always pass it along — the
 // catalog entry always knows which repo it came from.
+// fetchCleanup here is the guard against a repo-side folder rename quietly
+// leaving a second copy behind: the "Clean up" badge lights up right away
+// instead of the duplicate going unnoticed.
 export async function installApp(slug, repo) {
   const r = await apiJson('POST', '/api/_manager/library/install', repo ? { slug, repo } : { slug })
-  if (r.ok) await Promise.all([fetchState(), fetchLibrary(false)])
+  if (r.ok) await Promise.all([fetchState(), fetchLibrary(false), fetchCleanup()])
   return r
 }
 export async function updateApp(slug) {
@@ -167,7 +232,7 @@ export async function updateApp(slug) {
 }
 export async function uninstallApp(slug) {
   const r = await apiJson('POST', '/api/_manager/library/uninstall', { slug })
-  if (r.ok) await Promise.all([fetchState(), fetchLibrary(false)])
+  if (r.ok) await Promise.all([fetchState(), fetchLibrary(false), fetchCleanup()])
   return r
 }
 export async function addLibraryRepo(repo, branch) {
@@ -204,7 +269,7 @@ export async function uploadLibraryApp(file) {
       body: buf,
     })
     const json = await r.json().catch(() => ({}))
-    if (r.ok) await Promise.all([fetchState(), fetchLibrary(false)])
+    if (r.ok) await Promise.all([fetchState(), fetchLibrary(false), fetchCleanup()])
     return { status: r.status, ok: r.ok, json }
   } catch (err) {
     return { status: 0, ok: false, json: { error: String(err) } }
@@ -212,3 +277,4 @@ export async function uploadLibraryApp(file) {
 }
 
 fetchState()
+fetchCleanup()

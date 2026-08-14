@@ -249,6 +249,42 @@ function createMockState() {
           { flag: '--format', type: 'str', default: '24h', choices: ['24h', '12h'], help: 'Time format' },
         ],
       }),
+      // A duplicate pair (the repo renamed its folder, so the install made a
+      // second copy) plus a config-only orphan, so the cleanup panel has
+      // something to show in `npm run dev`. See docs/CONTRACT.md "Cleanup".
+      makeApp({
+        slug: 'weather-forecast',
+        name: 'Weather Forecast',
+        description: 'Current weather and multi-day forecasts for BUSY Bar.',
+        tags: ['weather', 'info'],
+        status: 'stopped',
+        pid: null,
+        enabled: false,
+        source: 'library',
+        variations: { default: { args: {}, env: {}, priority: null } },
+      }),
+      makeApp({
+        slug: 'weather_forecast',
+        name: 'Weather Forecast',
+        description: 'Current weather and multi-day forecasts for BUSY Bar.',
+        tags: ['weather', 'info'],
+        status: 'stopped',
+        pid: null,
+        enabled: false,
+        source: 'library',
+        variations: { default: { args: { '--city': 'Rijnsburg', '--days': '7' }, env: {}, priority: null } },
+      }),
+      makeApp({
+        slug: 'pr-test-13',
+        name: 'pr-test-13',
+        description: '',
+        tags: [],
+        dir: null,
+        status: 'stopped',
+        pid: null,
+        enabled: false,
+        missing: true,
+      }),
       makeApp({
         slug: 'weather',
         name: 'Weather',
@@ -417,6 +453,69 @@ export function managerMockPlugin() {
     res.end(JSON.stringify(obj))
   }
 
+  // Derived from the live mock state rather than hardcoded, so removing an app
+  // in the dev UI actually empties the panel. The real detector compares
+  // .busybar-library.json sha maps; here "same name, normalized-equal slugs"
+  // stands in for that, which is enough to exercise the UI.
+  function hasSettings(app) {
+    const v = (app.variations && app.variations[app.variation]) || {}
+    return !!(Object.keys(v.args || {}).length || Object.keys(v.env || {}).length || v.priority != null)
+  }
+  function buildMockCleanup() {
+    const orphans = state.apps
+      .filter((a) => a.missing)
+      .map((a) => ({ slug: a.slug, enabled: a.enabled, hasSettings: hasSettings(a) }))
+
+    const byName = {}
+    for (const a of state.apps) {
+      if (a.missing || a.source === 'local') continue
+      ;(byName[a.name] = byName[a.name] || []).push(a)
+    }
+    const duplicates = Object.values(byName)
+      .filter((group) => group.length > 1)
+      .map((group) => {
+        const keep = group.find((a) => a.enabled) || group.find((a) => !hasSettings(a)) || group[0]
+        const losers = group.filter((a) => a.slug !== keep.slug)
+        const bothDirty = hasSettings(keep) && losers.some(hasSettings)
+        const bothOn = group.filter((a) => a.enabled).length > 1
+        const confidence = bothDirty || bothOn ? 'review' : 'certain'
+        const donor = losers.find(hasSettings)
+        return {
+          id: `mock:${keep.slug}`,
+          keep: keep.slug,
+          remove: losers.map((a) => a.slug),
+          confidence,
+          signals: ['same-repo', 'identical-files', 'normalized-slug', 'same-name'],
+          reason: bothOn
+            ? 'both copies are enabled — disable the one you don\'t want first'
+            : bothDirty
+              ? 'both copies have custom settings'
+              : null,
+          migrate:
+            confidence === 'certain' && donor && !hasSettings(keep)
+              ? { from: donor.slug, to: keep.slug, variations: Object.keys(donor.variations || {}) }
+              : null,
+          apps: group.map((a) => ({
+            slug: a.slug, name: a.name, role: a.slug === keep.slug ? 'keep' : 'remove',
+            source: a.source, repo: installedFrom[a.slug] || REPO_A, enabled: a.enabled,
+            installedAt: nowMs() - 86_400_000, updatedAt: nowMs() - 86_400_000,
+            inCatalog: a.slug === keep.slug, hasSettings: hasSettings(a),
+          })),
+        }
+      })
+
+    const removable = orphans
+      .map((o) => o.slug)
+      .concat(duplicates.filter((g) => g.confidence === 'certain').flatMap((g) => g.remove))
+      .sort()
+    return {
+      orphans,
+      duplicates,
+      removable,
+      counts: { orphans: orphans.length, duplicateGroups: duplicates.length, removable: removable.length },
+    }
+  }
+
   return {
     name: 'busybar-manager-mock',
     configureServer(server) {
@@ -508,6 +607,22 @@ export function managerMockPlugin() {
           }
           broadcastState()
           return sendJson(res, 200, { ok: true })
+        }
+
+        const removeMatch = p.match(/^\/api\/_manager\/apps\/([^/]+)$/)
+        if (removeMatch && req.method === 'DELETE') {
+          const slug = decodeURIComponent(removeMatch[1])
+          if (!findApp(slug)) return sendJson(res, 404, { error: `unknown app: ${slug}` })
+          state.apps = state.apps.filter((a) => a.slug !== slug)
+          const entry = library.catalog.find((c) => c.slug === slug && c.installed)
+          if (entry) {
+            entry.installed = false
+            entry.updateAvailable = false
+            entry.source = null
+            delete installedFrom[slug]
+          }
+          broadcastState()
+          return sendJson(res, 200, state)
         }
 
         const varMatch = p.match(/^\/api\/_manager\/apps\/([^/]+)\/variations\/([^/]+)$/)
@@ -682,6 +797,45 @@ export function managerMockPlugin() {
             state.apps = state.apps.filter((a) => a.slug !== entry.slug)
             broadcastState()
             sendJson(res, 200, { ok: true })
+          })
+          return
+        }
+
+        // Cleanup (docs/CONTRACT.md "Cleanup"). The report is derived from the
+        // mock state, so removing an app here really does empty the panel.
+        if (p === '/api/_manager/cleanup' && req.method === 'GET') {
+          return sendJson(res, 200, buildMockCleanup())
+        }
+
+        if (p === '/api/_manager/cleanup' && req.method === 'POST') {
+          readJsonBody(req).then((body) => {
+            const slugs = Array.isArray(body.slugs) ? body.slugs : null
+            if (!slugs) return sendJson(res, 400, { error: 'slugs array required' })
+            const report = buildMockCleanup()
+            const removable = new Set(report.removable)
+            const removed = []
+            const migrated = []
+            const skipped = []
+            for (const slug of slugs) {
+              if (!removable.has(slug)) {
+                skipped.push({ slug, reason: 'not stale' })
+                continue
+              }
+              const group = report.duplicates.find((g) => g.migrate && g.migrate.from === slug)
+              if (group && body.migrateVariations !== false) {
+                const donor = findApp(slug)
+                const keeper = findApp(group.migrate.to)
+                if (donor && keeper) {
+                  keeper.variations = JSON.parse(JSON.stringify(donor.variations))
+                  keeper.variation = donor.variation
+                  migrated.push({ from: slug, to: keeper.slug, variations: Object.keys(keeper.variations) })
+                }
+              }
+              state.apps = state.apps.filter((a) => a.slug !== slug)
+              removed.push({ slug, dirRemoved: true, configRemoved: true })
+            }
+            broadcastState()
+            sendJson(res, 200, { removed, migrated, skipped, errors: [], state })
           })
           return
         }

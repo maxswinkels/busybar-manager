@@ -137,6 +137,8 @@ curl -s localhost:8321/api/_manager/state | jq
 | `POST /api/_manager/apps/<slug>/variation` | Switch the selected variation |
 | `PUT /api/_manager/apps/<slug>/variations/<name>` | Create/update a preset (`args`, `env`, `priority`) |
 | `GET /api/_manager/apps/<slug>/log` | Last ~500 log lines |
+| `DELETE /api/_manager/apps/<slug>` | Remove an app: stop it, delete its folder, drop its config entry |
+| `GET /api/_manager/cleanup` · `POST …/cleanup` | Find and remove stale config entries + duplicate installs |
 | `PUT /api/_manager/settings` | Update `barHost` / `appsDirs` / library token |
 | `GET /api/_manager/library` · `POST …/install` · `…/update` · `…/uninstall` | App library |
 | `GET /events` | SSE stream for live updates (state, logs) |
@@ -216,7 +218,7 @@ Settings live in `config.json` (atomic writes; changes from the dashboard persis
 npm test
 ```
 
-A zero-dependency end-to-end suite against a mock BUSY Bar + mock GitHub, covering app scanning and the supervisor, proxy behavior and priority/409 attribution, state persistence across restarts, variation switching and crash recovery, the library flow (ETag caching, token handling, install/update/uninstall, zip upload with path-traversal rejection), the bar passthrough, and the remote-control key presses behind the Controller tab.
+A zero-dependency end-to-end suite against a mock BUSY Bar + mock GitHub, covering app scanning and the supervisor, proxy behavior and priority/409 attribution, state persistence across restarts, variation switching and crash recovery, the library flow (ETag caching, token handling, install/update/uninstall, zip upload with path-traversal rejection), cleanup of stale and duplicate apps (orphan removal, path containment, duplicate detection and wholesale settings migration), the bar passthrough, and the remote-control key presses behind the Controller tab.
 
 ## Requirements
 

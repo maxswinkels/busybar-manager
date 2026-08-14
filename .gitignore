@@ -9,5 +9,6 @@ config.json.tmp*
 # never commit. Ship config.example.json as the template instead.
 config.json
 config.json.corrupt-*
+config.json.pre-cleanup-*
 # Local Claude Code permission overrides
 .claude/settings.local.json

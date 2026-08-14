@@ -184,6 +184,27 @@ function ensureAppConfig(slug) {
   return config.apps[slug];
 }
 
+// "Has Max ever touched this?" — used by the cleanup detector to decide whether
+// an entry carries settings worth preserving. A variation is untouched when it
+// still matches defaultVariation().
+function isDefaultVariation(v) {
+  if (!v || typeof v !== "object") return true;
+  if (v.priority !== null && v.priority !== undefined) return false;
+  if (v.args && Object.keys(v.args).length) return false;
+  if (v.env && Object.keys(v.env).length) return false;
+  return true;
+}
+
+// Pristine = exactly the shape defaultAppConfig() hands out: a single "default"
+// variation with nothing configured in it. `enabled` deliberately does not
+// count — toggling an app on is not a setting worth migrating.
+function isPristineAppConfig(cfg) {
+  if (!cfg) return true;
+  const names = Object.keys(cfg.variations || {});
+  if (names.length !== 1 || names[0] !== "default") return false;
+  return isDefaultVariation(cfg.variations.default);
+}
+
 function getListenPort() {
   return process.env.PORT ? Number(process.env.PORT) : config.listenPort;
 }
@@ -431,6 +452,39 @@ function isLocalSlug(slug) {
   return doScanLocal(config.appsDirs).some((e) => e.slug === slug);
 }
 
+// A slug is only ever a single path segment. Rejects separators, traversal and
+// dot-names (.staging-*/.trash-*/.venv are cleanupStaleLibraryDirs' business).
+// Always call this on the DECODED slug: the route regex `[^/]+` happily matches
+// %2F, which decodeURIComponent turns back into a separator.
+function isSafeSlug(slug) {
+  if (!slug || typeof slug !== "string") return false;
+  if (slug.includes("/") || slug.includes("\\") || slug.includes("\0")) return false;
+  if (slug === "." || slug === "..") return false;
+  if (slug.startsWith(".")) return false;
+  return true;
+}
+
+// The ONLY path allowed to reach fs.rmSync. Proves <apps>/<slug> is a direct,
+// non-dot, non-symlink child of APPS_INSTALL_DIR before handing it out; returns
+// null when there is nothing removable there (config-only orphan, an app that
+// lives in appsDirs, or an unsafe slug). Containment is enforced here rather
+// than by the caller's source classification, so a user's appsDirs folder is
+// structurally unreachable no matter which code path asks.
+function resolveManagedAppDir(slug) {
+  if (!isSafeSlug(slug)) return null;
+  const base = path.resolve(APPS_INSTALL_DIR);
+  const full = path.resolve(base, slug);
+  if (path.dirname(full) !== base) return null;
+  let st;
+  try {
+    st = fs.lstatSync(full);
+  } catch (_) {
+    return null;
+  }
+  if (!st.isDirectory() || st.isSymbolicLink()) return null;
+  return full;
+}
+
 /* ------------------------------- supervisor ------------------------------- */
 
 const runtime = {}; // slug -> { status, pid, child, backoffMs, restartTimer, stableTimer, stopping, logs, applicationNames, lastDraw, blocked }
@@ -571,6 +625,18 @@ async function startApp(slug) {
     }
   }
 
+  // ensureVenv can run for a minute (python -m venv + pip install) with no
+  // child to signal, so a stop/remove landing in that window resolves right
+  // away and — for remove — deletes the directory underneath us. Bail here
+  // rather than spawning into a cwd that no longer exists.
+  if (rt.stopping || !findEntry(slug)) {
+    rt.starting = false;
+    rt.stopping = false;
+    rt.status = "stopped";
+    scheduleStateBroadcast();
+    return false;
+  }
+
   const appCfg = getAppConfigView(slug);
   const variation = appCfg.variations[appCfg.variation] || appCfg.variations.default || defaultVariation();
   const argv = [entry.scriptPath, "--host", `127.0.0.1:${getListenPort()}`, ...buildArgv(variation.args)];
@@ -623,6 +689,10 @@ async function startApp(slug) {
   return true;
 }
 
+// Also the guard that keeps a removed app from resurrecting itself: once
+// removeApp() drops config.apps[slug], getAppConfigView falls back to
+// defaultAppConfig() (enabled: false) and both checks below bail. Do not
+// "simplify" either of them away.
 function scheduleRestart(slug) {
   if (!getAppConfigView(slug).enabled) return;
   const rt = getRuntime(slug);
@@ -641,6 +711,9 @@ function stopApp(slug) {
     const rt = getRuntime(slug);
     clearRestartTimers(rt);
     if (!rt.child) {
+      // No child yet, but startApp may be mid-await inside ensureVenv. Leave
+      // the stopping flag set so it bails instead of spawning after we return.
+      if (rt.starting) rt.stopping = true;
       if (rt.status !== "stopped") {
         rt.status = "stopped";
         scheduleStateBroadcast();
@@ -672,7 +745,50 @@ function stopApp(slug) {
 
 async function restartApp(slug) {
   await stopApp(slug);
+  // A restart is not a stop: if stopApp just flagged an in-flight start (no
+  // child yet because ensureVenv is still running), clear the flag again so
+  // that start runs to completion instead of bailing. Disable and remove
+  // deliberately leave it set — there the app is meant to end up stopped.
+  getRuntime(slug).stopping = false;
   return startApp(slug);
+}
+
+// Remove an app entirely: stop it, delete its managed folder, drop its config
+// entry. The general primitive behind DELETE /api/_manager/apps/:slug and the
+// cleanup endpoints — unlike library/uninstall it needs no library stamp, so
+// config-only orphans, uploads and manually dropped folders are all removable.
+//
+// Order is deliberate: stop -> filesystem -> config. If rmSync throws we return
+// with the config intact (app stopped but still listed), which is recoverable;
+// the reverse order would lose the user's variations on an EACCES.
+async function removeApp(slug) {
+  // resolveManagedAppDir is the only containment check: it can only ever return
+  // a direct child of APPS_INSTALL_DIR, so an appsDirs folder the user owns is
+  // unreachable here regardless of how the app is classified. null = nothing on
+  // disk to delete (config-only orphan, or the app lives in appsDirs).
+  const dir = resolveManagedAppDir(slug);
+  const rt = runtime[slug];
+  const wasActive = !!rt && (rt.status === "running" || rt.status === "starting");
+  const names = rt && rt.applicationNames.size ? Array.from(rt.applicationNames) : [slug];
+
+  await stopApp(slug);
+  // Only clear the bar for an app that was actually drawing. sendDisplayClear
+  // has a 5s timeout, and a batch of never-started orphans would otherwise
+  // block the event loop for half a minute against an unreachable bar.
+  if (wasActive) await Promise.all(names.map((n) => sendDisplayClear(n)));
+
+  if (dir) {
+    fs.rmSync(dir, { recursive: true, force: true });
+    delete optionsCache[path.join(dir, "app.py")];
+  }
+  invalidateScanCache();
+
+  const hadConfig = !!config.apps[slug];
+  delete config.apps[slug];
+  delete runtime[slug];
+  // Otherwise currentScreenOwner() keeps naming a slug that no longer exists.
+  if (lastSuccessfulDraw && lastSuccessfulDraw.slug === slug) lastSuccessfulDraw = null;
+  return { slug, dirRemoved: !!dir, configRemoved: hadConfig };
 }
 
 /* ---------------------------- draw attribution ---------------------------- */
@@ -1592,6 +1708,178 @@ function publicLibraryPayload() {
   };
 }
 
+/* ---------------------------------- cleanup -------------------------------- */
+// Detects two kinds of junk in the installed list and reports them for the user
+// to confirm. Never acts on its own initiative (see docs/CONTRACT.md "Cleanup"):
+//   orphan    — a config.apps entry whose folder is gone (state `missing: true`)
+//   duplicate — one upstream app installed under two slugs, e.g. after the repo
+//               renamed its folder and the install made a copy instead of
+//               replacing. Grouping is deliberately conservative; anything less
+//               than certain is surfaced for review, never auto-removed.
+
+function normalizedSlug(s) {
+  return String(s || "").toLowerCase().replace(/[_\s]+/g, "-").replace(/-+/g, "-").replace(/^-|-$/g, "");
+}
+
+// Identity of an install's tracked content: sorted "path=sha" pairs. Returns
+// null for a missing/empty files map — "" would make every stampless app
+// collide with every other one into a single bogus duplicate group.
+function stampFileSetKey(stamp) {
+  const files = stamp && stamp.files;
+  if (!files || typeof files !== "object") return null;
+  const keys = Object.keys(files);
+  if (!keys.length) return null;
+  return keys.sort().map((k) => `${k}=${files[k]}`).join("\n");
+}
+
+function detectOrphans() {
+  const seen = new Set(scanAppsLite().map((e) => e.slug));
+  return Object.keys(config.apps)
+    .filter((slug) => !seen.has(slug))
+    .sort()
+    .map((slug) => ({
+      slug,
+      enabled: !!config.apps[slug].enabled,
+      hasSettings: !isPristineAppConfig(config.apps[slug]),
+    }));
+}
+
+// Keeper rule, in order: enabled > still in the catalog > freshest > slug asc.
+// Catalog membership outranks recency because a slug the catalog no longer
+// carries can never be updated again (computeUpdateAvailable returns false),
+// and `updatedAt` outranks `installedAt` because deployLibraryApp deliberately
+// preserves installedAt across updates — it is the first-ever install date.
+function pickKeeper(members) {
+  return members.slice().sort((a, b) => {
+    if (a.enabled !== b.enabled) return a.enabled ? -1 : 1;
+    if (a.inCatalog !== b.inCatalog) return a.inCatalog ? -1 : 1;
+    const ta = a.updatedAt || a.installedAt || 0;
+    const tb = b.updatedAt || b.installedAt || 0;
+    if (ta !== tb) return tb - ta;
+    return a.slug < b.slug ? -1 : 1;
+  })[0];
+}
+
+function detectDuplicates() {
+  const catalogSlugs = new Set(aggregatedCatalog().map((c) => c.slug));
+  const members = [];
+  for (const e of scanAppsLite()) {
+    if (e.source === "local") continue; // the user's own working copies, never ours to group
+    const stamp = readLibraryStamp(e.slug);
+    const cfg = config.apps[e.slug];
+    members.push({
+      slug: e.slug,
+      name: e.name,
+      source: e.source,
+      repo: (stamp && stamp.repo) || null,
+      fileKey: stampFileSetKey(stamp),
+      enabled: !!(cfg && cfg.enabled),
+      installedAt: (stamp && stamp.installedAt) || null,
+      updatedAt: (stamp && stamp.updatedAt) || null,
+      inCatalog: catalogSlugs.has(e.slug),
+      hasSettings: !isPristineAppConfig(cfg),
+    });
+  }
+
+  // S1 — same origin + byte-identical tracked files. Bucketed by source too:
+  // library stamps carry git blob shas, upload stamps carry sha256, so the two
+  // namespaces must never be compared with each other.
+  const groups = new Map();
+  for (const m of members) {
+    if (!m.fileKey) continue;
+    const key = JSON.stringify([m.source, m.repo || "", m.fileKey]);
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(m);
+  }
+
+  const out = [];
+  for (const group of groups.values()) {
+    if (group.length < 2) continue;
+    const keep = pickKeeper(group);
+    const losers = group.filter((m) => m.slug !== keep.slug);
+
+    // S2/S3 corroborate S1. Neither is ever a signal on its own: two linked
+    // repos both shipping a "Clock" is normal, and a normalized-slug twin with
+    // different content may well be a real second app.
+    const sameNormSlug = losers.some((m) => normalizedSlug(m.slug) === normalizedSlug(keep.slug));
+    const sameName = losers.some((m) => m.name === keep.name);
+    const signals = ["same-repo", "identical-files"];
+    if (sameNormSlug) signals.push("normalized-slug");
+    if (sameName) signals.push("same-name");
+
+    let confidence = "certain";
+    let reason = null;
+    if (!sameNormSlug && !sameName) {
+      confidence = "review";
+      reason = "identical files but a different slug and name — check before removing";
+    } else if (group.filter((m) => m.enabled).length > 1) {
+      confidence = "review";
+      reason = "both copies are enabled — disable the one you don't want first";
+    } else if (keep.hasSettings && losers.some((m) => m.hasSettings)) {
+      confidence = "review";
+      reason = "both copies have custom settings — remove the one you don't want from its app card";
+    }
+
+    // Wholesale or not at all: a key-by-key merge of two settings sets produces
+    // a config that runs but is wrong. Only fires when the keeper is untouched
+    // and exactly one loser carries settings. `enabled` never needs migrating —
+    // the keeper rule already prefers the enabled copy, and a group with two
+    // enabled copies is downgraded to review above.
+    let migrate = null;
+    if (confidence === "certain" && !keep.hasSettings) {
+      const donors = losers.filter((m) => m.hasSettings);
+      if (donors.length === 1) {
+        const donorCfg = config.apps[donors[0].slug];
+        migrate = {
+          from: donors[0].slug,
+          to: keep.slug,
+          variations: Object.keys(donorCfg.variations || {}),
+        };
+      }
+    }
+
+    out.push({
+      id: `${keep.repo || keep.source}:${keep.slug}`,
+      keep: keep.slug,
+      remove: losers.map((m) => m.slug),
+      confidence,
+      signals,
+      reason,
+      migrate,
+      apps: group.map((m) => ({
+        slug: m.slug, name: m.name, role: m.slug === keep.slug ? "keep" : "remove",
+        source: m.source, repo: m.repo, enabled: m.enabled,
+        installedAt: m.installedAt, updatedAt: m.updatedAt,
+        inCatalog: m.inCatalog, hasSettings: m.hasSettings,
+      })),
+    });
+  }
+  return out.sort((a, b) => (a.keep < b.keep ? -1 : 1));
+}
+
+// Deliberately NOT part of buildState(): that runs at ~4/s over SSE and this
+// reads a stamp per installed app. Same split the library already uses (a
+// summary in state, the full catalog behind its own endpoint). Not cached: it is
+// only ever reached from the two /cleanup endpoints, and a cache keyed on the
+// scan would go stale the moment a variation is edited.
+function buildCleanupReport() {
+  const orphans = detectOrphans();
+  const duplicates = detectDuplicates();
+  // `removable` is the auto-recommend set and exactly what the UI echoes back
+  // to POST /cleanup. Review groups contribute nothing to it.
+  const removable = orphans
+    .map((o) => o.slug)
+    .concat(duplicates.filter((g) => g.confidence === "certain").flatMap((g) => g.remove))
+    .sort();
+  const report = {
+    orphans,
+    duplicates,
+    removable,
+    counts: { orphans: orphans.length, duplicateGroups: duplicates.length, removable: removable.length },
+  };
+  return report;
+}
+
 /* -------------------------------- manager state ---------------------------- */
 
 function buildState() {
@@ -1925,19 +2213,98 @@ async function apiLibraryRemoveRepo(body, res) {
   sendJSON(res, 200, publicLibraryPayload());
 }
 
+// Superseded by DELETE /api/_manager/apps/:slug (which also handles stampless
+// folders and config-only orphans); kept for compatibility.
 async function apiLibraryUninstall(body, res) {
   const slug = body && body.slug;
   if (!slug || typeof slug !== "string") return sendJSON(res, 400, { error: "slug required" });
+  if (!isSafeSlug(slug)) return sendJSON(res, 400, { error: `invalid slug: ${slug}` });
   const stamp = readLibraryStamp(slug);
   if (!stamp) return sendJSON(res, 404, { error: `app '${slug}' has no library stamp; cannot uninstall` });
-  await stopApp(slug);
   try {
-    fs.rmSync(path.join(APPS_INSTALL_DIR, slug), { recursive: true, force: true });
+    await removeApp(slug);
   } catch (e) {
     return sendJSON(res, 500, { error: `uninstall failed: ${e.message}` });
   }
-  invalidateScanCache();
-  delete config.apps[slug];
+  persist();
+  scheduleStateBroadcast();
+  sendJSON(res, 200, buildState());
+}
+
+function apiCleanupGet(res) {
+  sendJSON(res, 200, buildCleanupReport());
+}
+
+// Takes the exact slugs the UI rendered rather than a "remove everything stale"
+// flag, and re-validates each against the server's own current report. The
+// result is the intersection of what the user saw and what is still true —
+// never a superset of either, so a stale tab (or a library check that landed in
+// between) can't widen an irreversible delete, and the endpoint can't be used
+// as an arbitrary-delete oracle.
+async function apiCleanupRun(body, res) {
+  const slugs = body && body.slugs;
+  if (!Array.isArray(slugs)) return sendJSON(res, 400, { error: "slugs array required" });
+  const migrateVariations = !body || body.migrateVariations !== false;
+  const report = buildCleanupReport();
+  const removableSet = new Set(report.removable);
+
+  const removed = [];
+  const migrated = [];
+  const skipped = [];
+  const errors = [];
+  let touched = false;
+
+  for (const slug of slugs) {
+    if (typeof slug !== "string" || !isSafeSlug(slug) || !removableSet.has(slug)) {
+      skipped.push({ slug: String(slug), reason: "not stale" });
+      continue;
+    }
+    if (!touched) {
+      // Same idea as the .corrupt-<ts> backup in loadConfig(): one rollback
+      // point before the first irreversible mutation of the run.
+      try {
+        fs.copyFileSync(CONFIG_PATH, CONFIG_PATH + ".pre-cleanup-" + Date.now());
+      } catch (_) {}
+      touched = true;
+    }
+    // Migrate BEFORE removing: once the entry is gone its variations are too.
+    if (migrateVariations) {
+      const group = report.duplicates.find((g) => g.migrate && g.migrate.from === slug);
+      if (group) {
+        const donor = config.apps[slug];
+        const keeper = ensureAppConfig(group.migrate.to);
+        if (donor) {
+          keeper.variations = JSON.parse(JSON.stringify(donor.variations));
+          keeper.variation = donor.variation;
+          migrated.push({ from: slug, to: group.migrate.to, variations: Object.keys(keeper.variations) });
+        }
+      }
+    }
+    try {
+      removed.push(await removeApp(slug));
+    } catch (e) {
+      errors.push({ slug, error: e.message || String(e) });
+    }
+  }
+
+  if (touched) persist();
+  scheduleStateBroadcast();
+  // The one endpoint that does not simply return buildState(): a batch op's
+  // point is its report. State is nested so the client stays a one-liner.
+  sendJSON(res, 200, { removed, migrated, skipped, errors, state: buildState() });
+}
+
+async function apiRemoveApp(slug, res) {
+  if (!isSafeSlug(slug)) return sendJSON(res, 400, { error: `invalid slug: ${slug}` });
+  // Tolerates config-only slugs, same as apiDisable — that is the whole point.
+  if (!findEntry(slug) && !config.apps[slug] && !resolveManagedAppDir(slug)) {
+    return sendJSON(res, 404, { error: `unknown app: ${slug}` });
+  }
+  try {
+    await removeApp(slug);
+  } catch (e) {
+    return sendJSON(res, 500, { error: `remove failed: ${e.message}` });
+  }
   persist();
   scheduleStateBroadcast();
   sendJSON(res, 200, buildState());
@@ -1974,6 +2341,11 @@ async function handleManagerApi(req, res, p, method, u) {
       return apiLibraryRemoveRepo(body, res);
     }
     if (p === "/api/_manager/library/upload" && method === "POST") return handleLibraryUpload(req, res, u);
+    if (p === "/api/_manager/cleanup" && method === "GET") return apiCleanupGet(res);
+    if (p === "/api/_manager/cleanup" && method === "POST") {
+      const body = await readJsonBody(req);
+      return apiCleanupRun(body, res);
+    }
     let m;
     if ((m = p.match(/^\/api\/_manager\/apps\/([^/]+)\/enable$/)) && method === "POST") return apiEnable(decodeURIComponent(m[1]), res);
     if ((m = p.match(/^\/api\/_manager\/apps\/([^/]+)\/disable$/)) && method === "POST") return apiDisable(decodeURIComponent(m[1]), res);
@@ -1990,6 +2362,7 @@ async function handleManagerApi(req, res, p, method, u) {
       return apiDeleteVariation(decodeURIComponent(m[1]), decodeURIComponent(m[2]), res);
     }
     if ((m = p.match(/^\/api\/_manager\/apps\/([^/]+)\/log$/)) && method === "GET") return apiLog(decodeURIComponent(m[1]), res);
+    if ((m = p.match(/^\/api\/_manager\/apps\/([^/]+)$/)) && method === "DELETE") return apiRemoveApp(decodeURIComponent(m[1]), res);
     return sendJSON(res, 404, { error: `no such manager route: ${method} ${p}` });
   } catch (err) {
     sendJSON(res, 500, { error: err.message || "internal error" });

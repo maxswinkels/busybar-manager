@@ -15,14 +15,14 @@
     </div>
 
     <div class="app-row-controls">
-      <label class="switch" :title="app.enabled ? 'Disable' : 'Enable'">
-        <input type="checkbox" :checked="app.enabled" :disabled="busy" @change="toggleEnabled" />
+      <label class="switch" :title="app.missing ? 'Folder is gone — remove this entry' : app.enabled ? 'Disable' : 'Enable'">
+        <input type="checkbox" :checked="app.enabled" :disabled="busy || app.missing" @change="toggleEnabled" />
         <span class="track"></span>
       </label>
       <select
         class="select compact"
         :value="app.variation"
-        :disabled="busy || !hasVariations"
+        :disabled="busy || !hasVariations || app.missing"
         @change="onVariationChange"
       >
         <option v-for="name in variationNames" :key="name" :value="name">{{ name }}</option>
@@ -35,9 +35,17 @@
         @click="doUpdate"
         v-html="withLabel(icons.download, 'Update')"
       ></button>
-      <button class="pill sm" :disabled="busy || app.status === 'stopped'" @click="doRestart" v-html="withLabel(icons.restart, 'Restart')"></button>
-      <button class="pill sm" @click="$emit('edit-variation')" v-html="withLabel(icons.edit, 'Variation')"></button>
+      <button class="pill sm" :disabled="busy || app.missing || app.status === 'stopped'" @click="doRestart" v-html="withLabel(icons.restart, 'Restart')"></button>
+      <button class="pill sm" :disabled="app.missing" @click="$emit('edit-variation')" v-html="withLabel(icons.edit, 'Variation')"></button>
       <button class="pill sm" @click="$emit('open-logs')" v-html="withLabel(icons.terminal, 'Logs')"></button>
+      <button
+        v-if="canRemove"
+        class="pill sm danger"
+        :disabled="busy"
+        :title="removeTitle"
+        @click="onRemove"
+        v-html="withLabel(icons.trashFill, confirmRemove ? 'Sure?' : 'Remove')"
+      ></button>
       <span class="app-meta" v-if="app.pid">pid {{ app.pid }}</span>
     </div>
   </div>
@@ -45,7 +53,7 @@
 
 <script setup>
 import { computed, ref } from 'vue'
-import { enableApp, disableApp, restartApp, setVariation, updateApp } from '../composables/useManager'
+import { enableApp, disableApp, restartApp, setVariation, updateApp, removeApp } from '../composables/useManager'
 import { icons } from '../icons'
 
 const props = defineProps({
@@ -69,6 +77,20 @@ const statusLabel = computed(
 
 const variationNames = computed(() => Object.keys(props.app.variations || { default: {} }))
 const hasVariations = computed(() => variationNames.value.length > 0)
+
+// Hidden for appsDirs apps: the manager never deletes a folder Max owns, so
+// removing one would only drop its config entry and the app would reappear on
+// the next scan — a confusing no-op. Those belong in Settings (drop the folder
+// from appsDirs) instead. A missing entry is always removable, even if its last
+// known source was local.
+const canRemove = computed(() => props.app.missing || props.app.source !== 'local')
+const removeTitle = computed(() =>
+  props.app.missing
+    ? 'Remove this leftover config entry'
+    : props.app.dir
+      ? 'Stop this app and delete its folder'
+      : 'Remove this app'
+)
 
 function withLabel(svg, label) {
   return `${svg}<span>${label}</span>`
@@ -98,6 +120,25 @@ async function doUpdate() {
   busy.value = true
   try {
     await updateApp(props.app.slug)
+  } finally {
+    busy.value = false
+  }
+}
+
+// Two-step confirm, same pattern as the Library tab's Remove button.
+const confirmRemove = ref(false)
+async function onRemove() {
+  if (!confirmRemove.value) {
+    confirmRemove.value = true
+    setTimeout(() => {
+      confirmRemove.value = false
+    }, 3000)
+    return
+  }
+  confirmRemove.value = false
+  busy.value = true
+  try {
+    await removeApp(props.app.slug)
   } finally {
     busy.value = false
   }

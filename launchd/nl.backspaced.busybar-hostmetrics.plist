@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>nl.backspaced.busybar-hostmetrics</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>__PYTHON__</string>
+		<string>scripts/host-metrics.py</string>
+		<string>--host</string>
+		<string>__BIND__</string>
+		<string>--port</string>
+		<string>__PORT__</string>
+	</array>
+	<key>WorkingDirectory</key>
+	<string>__PROJECT_DIR__</string>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<true/>
+	<key>StandardOutPath</key>
+	<string>__PROJECT_DIR__/logs/hostmetrics.log</string>
+	<key>StandardErrorPath</key>
+	<string>__PROJECT_DIR__/logs/hostmetrics.err.log</string>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<!-- sysctl and netstat live in /usr/sbin, which launchd does not put on
+		     PATH by default. Leave it out and the agent serves 500s. -->
+		<key>PATH</key>
+		<string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+	</dict>
+</dict>
+</plist>

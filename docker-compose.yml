@@ -3,7 +3,12 @@ services:
     build: .
     image: busybar-manager:local
     container_name: busybar-manager
-    restart: unless-stopped
+    # `always` rather than `unless-stopped`: Docker Desktop stops running
+    # containers when it quits, and a container stopped that way is one
+    # `unless-stopped` refuses to bring back on the next daemon start. On a Mac
+    # that means the manager silently stays down after a reboot, which is
+    # exactly what the LaunchAgent (KeepAlive + RunAtLoad) is there to prevent.
+    restart: always
     ports:
       # Defaults to host-loopback only, same posture as the launchd install.
       # Set BUSYBAR_PUBLISH_HOST=0.0.0.0 (e.g. in .env) to expose the dashboard

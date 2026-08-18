@@ -120,6 +120,8 @@ The dashboard shows who owns the screen live, plus who's actively trying to draw
 
 ## Autostart (macOS)
 
+Two ways to keep the manager running: this LaunchAgent, or [Docker](#docker). Both work, so pick whichever fits your machine. They can't run side by side, because both want port 8321.
+
 Run the installer once:
 
 ```bash
@@ -134,6 +136,8 @@ tail -f logs/manager.log logs/manager.err.log   # view logs
 ```
 
 ## Docker
+
+Running in a container is an alternative to the [LaunchAgent](#autostart-macos), not a replacement for it: same manager, different runtime. Use it if you'd rather keep Node and Python off your machine, or run the manager on a Linux box.
 
 > [!NOTE]
 > If running the LaunchAgent, `docker compose up` will fail because the LaunchAgent already binds 8321. Either stop the LaunchAgent first, or change `BUSYBAR_PORT` in `.env` to a free port.
@@ -160,6 +164,7 @@ A few things differ from a bare-metal run:
 - `BUSYBAR_PUBLISH_HOST` (default `127.0.0.1`) set to `0.0.0.0` to make it reachable from the LAN. The dashboard has no authentication, so only do that on a trusted network.
 - **`config.json`'s `listenPort` is ignored**; instead set `BUSYBAR_PORT` in `.env` (default 8321).
 - In `local` bar mode, `barHost` must be an IP or DNS name the container can resolve. Docker's bridge network reaches the LAN fine, but it does not do mDNS — a `*.local` bar hostname needs the IP instead, or `network_mode: host`.
+- **Autostart is Docker's job here, not launchd's.** The container restarts itself (`restart: always`), but only once the daemon runs, so on macOS turn on Docker Desktop's *Settings → General → Start Docker Desktop when you sign in*. Without it, a reboot leaves the bar dark.
 
 ## The API
 

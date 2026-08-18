@@ -30,6 +30,24 @@ if ! command -v python3 &> /dev/null; then
 	exit 1
 fi
 
+# Build the dashboard: web/dist is not in git, so a fresh clone has nothing to
+# serve until Vite has run once. Rebuilding every install also keeps the bundle
+# in sync with web/src after a pull.
+NPM_CMD=$(command -v npm || true)
+if [ -z "$NPM_CMD" ]; then
+	NPM_CMD="$(dirname "$NODE_CMD")/npm"
+fi
+
+if [ ! -x "$NPM_CMD" ]; then
+	echo "Fout: npm niet gevonden. Installeer Node.js >=22 via Homebrew:" >&2
+	echo "  brew install node" >&2
+	exit 1
+fi
+
+echo "Dashboard bouwen (web/dist)..."
+"$NPM_CMD" --prefix "$PROJECT_DIR/web" install
+"$NPM_CMD" --prefix "$PROJECT_DIR/web" run build
+
 # Create logs directory
 mkdir -p "$PROJECT_DIR/logs"
 

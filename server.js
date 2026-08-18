@@ -2720,7 +2720,7 @@ function handleStatic(req, res, p) {
     res.writeHead(200, Object.assign({ "Content-Type": "text/plain; charset=utf-8" }, CORS));
     return res.end(
       "busybar-manager is running, but web/dist was not found.\n" +
-      "Build the dashboard (cd web && npm install && npm run build), or use the API directly:\n" +
+      "Build the dashboard (npm run build), or use the API directly:\n" +
       "  GET  /health\n  GET  /api/_manager/state\n  GET  /events (SSE)\n"
     );
   }

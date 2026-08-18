@@ -1,6 +1,10 @@
 node_modules/
 logs/
 apps/
+# Build artifact: everyone builds the dashboard from web/src themselves
+# (`npm run build` at the root, or scripts/install.sh). Keeping it out of git
+# avoids a merge conflict on every frontend PR (see #14).
+web/dist/
 .venv/
 __pycache__/
 .DS_Store

@@ -44,11 +44,12 @@
 ```bash
 git clone https://github.com/maxswinkels/busybar-manager.git
 cd busybar-manager
+npm run build   # builds the dashboard into web/dist (once, and after web changes)
 node server.js
 # → Dashboard: http://127.0.0.1:8321
 ```
 
-Open **http://127.0.0.1:8321**, install apps from the **Library** tab (pulled from [busybar-apps](https://github.com/maxswinkels/busybar-apps)), and toggle them on. The manager listens on `127.0.0.1:8321` and starts each app with `--host 127.0.0.1:8321`, forwarding its draws to the bar. It's a zero-dependency Node server, so there's nothing to `npm install` at the root.
+Open **http://127.0.0.1:8321**, install apps from the **Library** tab (pulled from [busybar-apps](https://github.com/maxswinkels/busybar-apps)), and toggle them on. The manager listens on `127.0.0.1:8321` and starts each app with `--host 127.0.0.1:8321`, forwarding its draws to the bar. The server itself is zero-dependency, so `npm run build` only installs what Vite needs for the dashboard; skip it and the server still runs, it just serves a plain-text page instead of the UI.
 
 > [!TIP]
 > No hardware yet? Point the manager at the [emulator](https://github.com/maxswinkels/busybar-emulator) instead: set **Bar host** to `127.0.0.1:8080` in the Settings tab. Everything works the same.
@@ -125,7 +126,7 @@ Run the installer once:
 ./scripts/install.sh
 ```
 
-It checks Node ≥22 + python3, creates `logs/`, installs the LaunchAgent to `~/Library/LaunchAgents/nl.backspaced.busybar-manager.plist` (substituting the real node path + project dir), bootstraps it with `launchctl`, and starts it. After login the manager always runs and every enabled app starts in its chosen variation.
+It checks Node ≥22 + python3, builds the dashboard (`web/dist`), creates `logs/`, installs the LaunchAgent to `~/Library/LaunchAgents/nl.backspaced.busybar-manager.plist` (substituting the real node path + project dir), bootstraps it with `launchctl`, and starts it. After login the manager always runs and every enabled app starts in its chosen variation.
 
 ```bash
 tail -f logs/manager.log logs/manager.err.log   # view logs
@@ -179,13 +180,14 @@ Zero-dependency Node server, Vue 3 frontend built with Vite, SSE for live update
 
 ### Building the dashboard
 
-`server.js` serves the built web UI from `web/dist/`, and that folder is **committed** so a fresh clone boots straight to a working dashboard. After changing anything in `web/src/`, rebuild and commit the new `web/dist`:
+`server.js` serves the built web UI from `web/dist/`. That folder is **not committed** (it's gitignored): everyone builds it from `web/src/`, so frontend PRs never collide over a generated bundle. Build it once after cloning, and again after changing anything in `web/src/`:
 
 ```bash
-cd web && npm install && npm run build
+npm run build          # from the repo root
+cd web && npm run dev  # or: live-reloading Vite dev server
 ```
 
-There's deliberately no automated build (no git hook) — do it manually after web changes.
+`scripts/install.sh` builds it for you as part of setting up the LaunchAgent. There's deliberately no automated build on `node server.js`, and no git hook: do it manually after web changes. Without a build the server still starts and the API works; `/` just answers with a note explaining how to build the dashboard.
 
 ## Configuration
 

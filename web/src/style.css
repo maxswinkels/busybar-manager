@@ -198,9 +198,10 @@ h2.card-title .badge svg{width:20px;height:20px}
 /* apps list (same anatomy as the emulator's apps tab) */
 main{display:flex;flex-direction:column;gap:16px;width:100%;max-width:688px;margin:0 auto}
 .app-search{position:relative;display:flex;align-items:center;margin:0 0 12px}
-.app-search-ic{position:absolute;left:11px;display:flex;width:15px;height:15px;color:var(--faint);pointer-events:none}
-.app-search-ic svg{width:15px;height:15px}
-.app-search input{width:100%;background:var(--card);border:1px solid var(--ring-out);color:var(--text);border-radius:9px;padding:8px 34px;font-family:var(--font);font-size:13px}
+.app-search-ic{position:absolute;left:11px;display:inline-flex;color:var(--faint);pointer-events:none}
+.app-search-ic svg{width:16px;height:16px}
+.app-search input{width:100%;background:var(--card);border:1px solid var(--ring-out);color:var(--text);border-radius:9px;font-family:var(--font);font-size:13px}
+.app-search input[type=text]{padding-left:36px;padding-right:34px}
 .app-search input:focus{outline:none;box-shadow:0 0 0 2px var(--brand)}
 .app-search input::placeholder{color:var(--faint)}
 .app-search-clear{position:absolute;right:6px;border:none;background:transparent;color:var(--faint);cursor:pointer;font-size:18px;line-height:1;padding:2px 7px;border-radius:6px}

@@ -176,6 +176,8 @@ A few things differ from a bare-metal run:
 - `BUSYBAR_PUBLISH_HOST` (default `127.0.0.1`) set to `0.0.0.0` to make it reachable from the LAN. The dashboard has no authentication, so only do that on a trusted network.
 - **`config.json`'s `listenPort` is ignored**; instead set `BUSYBAR_PORT` in `.env` (default 8321).
 - In `local` bar mode, `barHost` must be an IP or DNS name the container can resolve. Docker's bridge network reaches the LAN fine, but it does not do mDNS — a `*.local` bar hostname needs the IP instead, or `network_mode: host`.
+- **Apps that report on the Mac itself need the host metrics agent.** `mac-monitor` reads `ps`, `vm_stat`, `sysctl` and `netstat -ib`; in the container those are either missing or describe Docker Desktop's Linux VM, so the app used to draw three bars at 0%. No Docker flag fixes that, since `--pid=host` and `--network=host` both land in the VM rather than on macOS. Install the agent once with `./scripts/install-hostmetrics.sh`: it serves `{"cpu_pct", "mem_pct", "net_bytes"}` on `127.0.0.1:8322`, which the app finds at `host.docker.internal:8322` (override with `--metrics HOST:PORT` or `BUSYBAR_HOST_METRICS`, and use `BUSYBAR_HOST_METRICS_BIND=0.0.0.0` for a manager on another machine). Without it the app now exits with an explanation instead of reporting an idle Mac. `./scripts/uninstall-hostmetrics.sh` removes it again.
+
 - **Autostart is Docker's job here, not launchd's.** The container restarts itself (`restart: always`), but only once the daemon runs, so on macOS turn on Docker Desktop's *Settings → General → Start Docker Desktop when you sign in*. Without it, a reboot leaves the bar dark.
 
 ## The API

@@ -6,23 +6,16 @@
 	<string>nl.backspaced.busybar-manager</string>
 	<key>ProgramArguments</key>
 	<array>
-		<string>__NODE__</string>
-		<string>server.js</string>
+		<string>__APP_EXECUTABLE__</string>
 	</array>
-	<key>WorkingDirectory</key>
-	<string>__PROJECT_DIR__</string>
 	<key>RunAtLoad</key>
 	<true/>
 	<key>KeepAlive</key>
-	<true/>
-	<key>StandardOutPath</key>
-	<string>__PROJECT_DIR__/logs/manager.log</string>
-	<key>StandardErrorPath</key>
-	<string>__PROJECT_DIR__/logs/manager.err.log</string>
-	<key>EnvironmentVariables</key>
 	<dict>
-		<key>PATH</key>
-		<string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+		<key>SuccessfulExit</key>
+		<false/>
 	</dict>
+	<key>LimitLoadToSessionType</key>
+	<string>Aqua</string>
 </dict>
 </plist>

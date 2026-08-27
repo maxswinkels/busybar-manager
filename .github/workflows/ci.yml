@@ -8,9 +8,8 @@ on:
 jobs:
   # web/dist is not in git (see #14): the server serves whatever the developer
   # built locally, and `npm run build` at the root (or scripts/install.sh)
-  # produces it. Nothing here can go stale anymore, so all CI has to prove is
-  # that web/src still builds: a broken frontend change would otherwise only
-  # surface on the next person's machine.
+  # produces it. CI proves that web/src still builds so a broken frontend
+  # change does not surface only on the next person's machine.
   build:
     name: Dashboard builds
     runs-on: ubuntu-latest
@@ -33,3 +32,21 @@ jobs:
 
       - name: Check the build produced a dashboard
         run: test -f web/dist/index.html
+
+  macos-app:
+    name: macOS app compiles
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Type-check the native launcher
+        run: |
+          swiftc -warnings-as-errors \
+            -target "$(uname -m)-apple-macosx26.0" \
+            -sdk "$(xcrun --sdk macosx --show-sdk-path)" \
+            -typecheck -framework AppKit macos/BusyBarManager.swift
+
+      - name: Validate deployment files
+        run: |
+          plutil -lint macos/Info.plist launchd/nl.backspaced.busybar-manager.plist
+          bash -n scripts/install.sh scripts/uninstall.sh

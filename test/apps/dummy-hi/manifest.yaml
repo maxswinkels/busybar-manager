@@ -1,0 +1,6 @@
+name: Dummy Hi
+author: busybar-manager-tests
+description: High-priority dummy app used by busybar-manager's e2e tests.
+tags:
+  - test
+preview: ./preview.gif

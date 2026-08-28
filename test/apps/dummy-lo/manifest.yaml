@@ -1,0 +1,6 @@
+name: Dummy Lo
+author: busybar-manager-tests
+description: Low-priority dummy app used by busybar-manager's e2e tests.
+tags:
+  - test
+preview: ./preview.gif

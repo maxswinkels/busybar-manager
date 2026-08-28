@@ -459,46 +459,68 @@ function discoverOptions(scriptPath) {
 // An option may carry several names, and the two argparse layouts both occur:
 // "  --language, --lang {de,en}" (Python >= 3.13, metavar once at the end) and
 // "  --language LANG, --lang LANG" (older, metavar repeated per name).
-const OPT_LINE = /^[ ]{2}(-{1,2}[\w-]+(?:[ =](?:\{[^}]*\}|[^\s,]+))?(?:,[ ]+-{1,2}[\w-]+(?:[ =](?:\{[^}]*\}|[^\s,]+))?)*)(?:[ \t]{2,}(\S.*))?$/gm;
-// A name is only ever the first token or one that follows a comma — which is
-// what keeps a negative metavar ("--offset -10-10") from reading as one.
-const OPT_NAME = /(?:^|,[ ]+)(-{1,2}[\w-]+)/g;
-const OPT_META = /(?:^|,[ ]+)-{1,2}[\w-]+[ =](\{[^}]*\}|[^\s,]+)/;
+const OPT_LINE = /^[ ]{2}(-{1,2}[\w-]+.*?)(?:[ \t]{2,}(\S.*))?$/;
+// Names are parsed strictly and the metavar loosely: argparse never validates
+// a metavar, so anything that is not a `{choice,list}` is an opaque value hint
+// ("OWNER/NAME", "NAME=URL", "FIVE,WEEK", "0-100", "[QUERY]", "W H") and only
+// a comma that introduces another name separates aliases (issue #20).
+const OPT_ALIAS = /,[ \t]+(?=-{1,2}[\w-])/;
+const OPT_PART = /^(-{1,2}[\w-]+)(?:[ =](\S.*))?$/;
+// nargs="?" brackets the metavar: "[QUERY]", "[{fast,slow}]", "[0-100]".
+const OPT_OPTIONAL_META = /^\[(.*)\]$/;
+const CHOICE_META = /^\{([^{}]*)\}$/;
 
 function parseHelpOptions(help) {
   const options = [];
-  OPT_LINE.lastIndex = 0;
-  let m;
-  while ((m = OPT_LINE.exec(help)) !== null) {
-    const [, invocation, rest] = m;
-    const names = Array.from(invocation.matchAll(OPT_NAME), (n) => n[1]);
-    if (names.some((n) => ARG_SKIP.has(n))) continue;
+  const lines = help.split(/\r?\n/);
+  for (let i = 0; i < lines.length; i++) {
+    const m = lines[i].match(OPT_LINE);
+    if (!m) continue;
+    const spec = parseInvocation(m[1]);
+    if (!spec || spec.names.some((n) => ARG_SKIP.has(n))) continue;
     // argparse accepts any of the names, so the longest one — the spelled-out
     // form a user recognises (--language over --lang, over -l) — is the one
     // reported, and the one a variation stores.
-    const flag = names.reduce((best, name) => (name.length > best.length ? name : best), names[0]);
-    const meta = (OPT_META.exec(invocation) || [])[1] || null;
-    let hint = rest || "";
+    const flag = spec.names.reduce((best, name) => (name.length > best.length ? name : best), spec.names[0]);
+    let hint = m[2] || "";
     if (!hint) {
-      const after = help.slice(m.index + m[0].length);
-      const cont = after.match(/^\n\s{10,}(\S.*)/);
+      const cont = (lines[i + 1] || "").match(/^\s{10,}(\S.*)$/);
       if (cont) hint = cont[1];
     }
     const def = (hint.match(/\(default:?\s*([^)]+)\)/) || [])[1] || null;
-    const opt = { flag, type: "str", default: def, choices: null, min: null, max: null, step: null, help: hint };
-    if (meta && meta.startsWith("{")) {
-      const choices = meta.slice(1, -1).split(",").map((s) => s.trim()).filter(Boolean);
-      const span = choiceSpan(choices);
-      if (span) Object.assign(opt, span);
-      else Object.assign(opt, { type: "choice", choices });
-    } else if (!meta) {
+    const meta = spec.meta;
+    const opt = { flag, type: "str", default: def, choices: null, min: null, max: null, step: null, meta, help: hint };
+    if (!meta) {
       opt.type = "bool";
     } else {
-      Object.assign(opt, metaSpan(meta) || {});
+      const bracketed = OPT_OPTIONAL_META.exec(meta);
+      const core = (bracketed ? bracketed[1] : meta).trim();
+      const listed = CHOICE_META.exec(core);
+      const choices = listed ? listed[1].split(",").map((s) => s.trim()).filter(Boolean) : [];
+      if (choices.length) Object.assign(opt, choiceSpan(choices) || { type: "choice", choices });
+      else Object.assign(opt, metaSpan(core) || {});
     }
     options.push(opt);
   }
   return options;
+}
+
+// "--language {de,en}, --lang {de,en}" -> names + the metavar, whichever name
+// carries it. A comma not followed by another name ("--coords LAT,LON") and a
+// leading dash inside the metavar ("--offset -10-10") stay part of the metavar.
+function parseInvocation(invocation) {
+  const names = [];
+  let meta = null;
+  for (const part of invocation.split(OPT_ALIAS)) {
+    const m = part.match(OPT_PART);
+    if (!m) return null;
+    // A second long name inside what would be the metavar means this is prose
+    // (an epilog example, say), not an option argparse printed.
+    if (m[2] && /(^|\s)--/.test(m[2])) return null;
+    names.push(m[1]);
+    if (!meta && m[2]) meta = m[2].trim();
+  }
+  return { names, meta };
 }
 
 // A bounded numeric option, which the dashboard renders as a slider instead of
@@ -905,15 +927,20 @@ async function ensureVenv(entry, slug) {
 // Convert a variation's {flag: value} args object into an argv array.
 // --host is always supplied by the supervisor, so any variation-supplied
 // --host is dropped (per contract).
-function buildArgv(argsObj) {
+// An option whose metavar names several values ("--size W H", nargs=2 or "+")
+// takes them as separate argv entries, the only form argparse accepts. Every
+// other value stays a single entry, spaces and all.
+function buildArgv(argsObj, options) {
+  const multi = new Set((options || []).filter((o) => o.meta && /\s/.test(o.meta)).map((o) => o.flag));
   const out = [];
   for (const [flag, value] of Object.entries(argsObj || {})) {
     if (flag === "--host") continue;
     if (value === true) out.push(flag);
     else if (value === false || value === null || value === undefined) continue;
     else {
-      out.push(flag);
-      out.push(String(value));
+      const values = multi.has(flag) ? String(value).trim().split(/\s+/).filter(Boolean) : [String(value)];
+      if (!values.length) continue;
+      out.push(flag, ...values);
     }
   }
   return out;
@@ -968,7 +995,7 @@ async function startApp(slug) {
 
   const variation = effectiveVariation(slug);
   rt.startedVariation = effectiveVariationName(slug);
-  const argv = [entry.scriptPath, "--host", `127.0.0.1:${getListenPort()}`, ...buildArgv(variation.args)];
+  const argv = [entry.scriptPath, "--host", `127.0.0.1:${getListenPort()}`, ...buildArgv(variation.args, discoverOptions(entry.scriptPath))];
   const env = Object.assign({}, process.env, variation.env || {}, { PYTHONUNBUFFERED: "1" });
 
   let child;

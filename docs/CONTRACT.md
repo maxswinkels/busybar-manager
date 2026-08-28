@@ -46,7 +46,7 @@ Mapping application_name→slug: when an app starts, the supervisor remembers wh
       "description": "…",
       "tags": ["clock"],
       "dir": "/abs/path/apps/clock",
-      "options": [ { "flag": "--host", "type": "str", "default": "10.0.4.20", "choices": null, "help": "…" } ],
+      "options": [ { "flag": "--lang", "type": "choice", "default": "en", "choices": ["de","en"], "min": null, "max": null, "step": null, "meta": "{de,en}", "help": "…" } ],
       "envSpec": [ { "key": "WEATHER_API_KEY", "example": "your-api-key-here", "help": "…" } ],
       "enabled": true,
       "status": "running",            // "running" | "starting" | "stopped" | "crashed"
@@ -258,6 +258,19 @@ Duplicate signals, ranked. Grouping only ever happens within a single `(source, 
 **Variation migration** is wholesale or not at all — never a key-by-key merge, which would produce a config that runs but is wrong. It only fires when the keeper's config is still pristine (a single untouched `default` variation) and exactly one of the removed copies carries settings. `enabled` is never migrated: the keeper rule already prefers the enabled copy.
 
 **Containment invariant:** the manager only ever deletes directories that are direct, non-dot, non-symlink children of `<projectroot>/apps/`. A slug is a single path segment — separators, `.`/`..` and leading dots are rejected with a 400, always after decoding. `appsDirs` folders are never deleted under any code path.
+
+## Option discovery (`options`)
+
+An app that mentions `argparse` is run once with `--help` during the scan (cached on the script's mtime and on its `.venv`'s, so a venv built after a failed scan re-discovers), and its option lines become the fields the variation editor renders: `{ flag, type, default, choices, min, max, step, meta, help }`.
+
+argparse prints each option as an invocation column (its names plus a metavar) and a help column separated by 2+ spaces, with the help moving to the next line when the invocation is too wide. The names are parsed strictly, the metavar loosely, because argparse never validates a metavar (issue #20):
+
+- **Several names per option** are read in both layouts argparse uses: `--language, --lang {de,en}` (Python ≥ 3.13) and `--language {de,en}, --lang {de,en}` (older). The option is reported once, under its **longest** name, which is also the name a variation stores; the aliases are not listed separately. A short-only option (`-q`) is reported under its short name.
+- **Any metavar** is accepted and reported verbatim as `meta`, which the dashboard shows as the field's placeholder when there is no default: `OWNER/NAME`, `NAME=URL`, `FIVE,WEEK`, `START:END`, `[QUERY]` (`nargs="?"`), `W H` (`nargs=2`), `TAGS [TAGS ...]` (`nargs="+"`).
+- **`type`**: no metavar → `bool`; `{a,b,c}` (also bracketed, `[{a,b,c}]`) → `choice`; a numeric range metavar (`0-100`, `1..10`, `-10-10`, `0.0-1.0`) or a long run of consecutive int choices → `int`/`float` with `min`/`max`/`step`, rendered as a slider; anything else → `str`.
+- **`default`** is read from a `(default: …)` in the help text, not from argparse itself.
+- `-h/--help`, `--host`, `--token` and `--test` are never offered: the supervisor owns them.
+- A metavar naming several values (`W H`, `TAGS [TAGS ...]`) is passed to the app as separate argv entries, so a variation stores `"--size": "10 20"` and the app is started with `--size 10 20`.
 
 ## Env var discovery (`envSpec`)
 

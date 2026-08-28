@@ -60,7 +60,7 @@
             v-else
             :id="'opt-' + opt.flag"
             type="text"
-            :placeholder="String(opt.default ?? '')"
+            :placeholder="String(opt.default ?? opt.meta ?? '')"
             v-model="formArgs[opt.flag]"
           />
           <span v-if="opt.help" class="hint">{{ opt.help }}</span>

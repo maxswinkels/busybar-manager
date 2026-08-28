@@ -275,6 +275,7 @@ function createMockState() {
           { flag: '--volume', type: 'int', default: '70', choices: null, min: 0, max: 100, step: 1, help: 'Chime volume percentage' },
           { flag: '--dim', type: 'bool', default: false, choices: null, help: 'Use dimmed colors' },
           { flag: '--units', type: 'str', default: 'metric', choices: ['metric', 'imperial'], help: 'Units' },
+          { flag: '--repo', type: 'str', default: null, choices: null, meta: 'OWNER/NAME', help: 'Repository to watch' },
         ],
         envSpec: [
           { key: 'WEATHER_API_KEY', example: 'your-api-key-here', help: 'API key from openweathermap.org' },

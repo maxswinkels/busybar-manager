@@ -6,9 +6,11 @@
  * Spins up test/mock-bar.js and server.js against a temp apps dir holding one
  * app whose parser covers every shape the dashboard renders: bounded numbers
  * (a range metavar, a fractional one, a negative one, and choices=range()),
- * a short choice set, a plain metavar, a bare flag and multi-name options.
- * Asserts the discovered option list, and that a value picked for a slider
- * actually reaches the app.
+ * a short choice set, a plain metavar, a bare flag and multi-name options,
+ * plus the descriptive metavars argparse allows but never validates
+ * (OWNER/NAME, NAME=URL, FIVE,WEEK, [QUERY], nargs tuples: issue #20).
+ * Asserts the discovered option list, and that values picked for a slider
+ * and for a two-value option actually reach the app.
  */
 const assert = require("assert/strict");
 const { spawn } = require("child_process");
@@ -100,8 +102,16 @@ parser.add_argument("-q", action="store_true", help="quiet")
 parser.add_argument("--theme", choices=["dark", "light"], default="dark", help="colour theme")
 parser.add_argument("--city", default="Amsterdam", help="city name")
 parser.add_argument("--dim", action="store_true", help="use dimmed colours")
+parser.add_argument("--repo", metavar="OWNER/NAME", default="busy/bar", help="repository to watch (default: busy/bar)")
+parser.add_argument("--feed", metavar="NAME=URL", help="feed to poll")
+parser.add_argument("--mock-usage", metavar="FIVE,WEEK", help="usage numbers to fake")
+parser.add_argument("--list-stations", nargs="?", metavar="QUERY", help="stations matching QUERY")
+parser.add_argument("--mode", nargs="?", choices=["fast", "slow"], help="optional mode")
+parser.add_argument("--size", nargs=2, type=int, metavar=("W", "H"), default=[64, 32], help="frame size")
+parser.add_argument("--tags", nargs="+", help="tags to show")
 args = parser.parse_args()
 print("args volume=" + str(args.volume) + " gain=" + str(args.gain) + " theme=" + args.theme, flush=True)
+print("args repo=" + args.repo + " size=" + str(args.size[0]) + "x" + str(args.size[1]), flush=True)
 while True:
     time.sleep(0.2)
 `;
@@ -154,6 +164,7 @@ async function main() {
     min: 0,
     max: 100,
     step: 1,
+    meta: "0-100",
     help: "chime volume percentage (default: 70)",
   });
 
@@ -166,6 +177,7 @@ async function main() {
     min: 0,
     max: 1,
     step: null,
+    meta: "0.0-1.0",
     help: "gain factor",
   });
   assert.equal(optOf(app, "--offset").type, "int");
@@ -183,6 +195,7 @@ async function main() {
     min: 0,
     max: 100,
     step: 1,
+    meta: `{${Array.from({ length: 101 }, (_, i) => i).join(",")}}`, // argparse spells choices=range(0, 101) out in full
     help: "panel brightness",
   });
 
@@ -199,12 +212,39 @@ async function main() {
   assert.equal(optOf(app, "--city").type, "str");
   assert.equal(optOf(app, "--dim").type, "bool");
 
+  log("a descriptive metavar is kept verbatim instead of hiding the option (issue #20)");
+  for (const [flag, meta] of [
+    ["--repo", "OWNER/NAME"],
+    ["--feed", "NAME=URL"],
+    ["--mock-usage", "FIVE,WEEK"],
+    ["--list-stations", "[QUERY]"],
+    ["--size", "W H"],
+    ["--tags", "TAGS [TAGS ...]"],
+  ]) {
+    const o = optOf(app, flag);
+    assert.ok(o, `${flag} should be discovered (metavar ${meta})`);
+    assert.equal(o.type, "str", `${flag} should take a value`);
+    assert.equal(o.meta, meta);
+    assert.equal(o.choices, null);
+  }
+  assert.equal(optOf(app, "--repo").default, "busy/bar");
+
+  log("an optional-value metavar keeps its choices");
+  assert.deepEqual(optOf(app, "--mode").choices, ["fast", "slow"]);
+  assert.equal(optOf(app, "--mode").type, "choice");
+
   log("--host stays hidden: the supervisor owns it");
   assert.equal(optOf(app, "--host"), undefined);
 
   log("a value picked for a bounded option reaches the app");
   assert.equal(
-    (await postJson(`${M}/api/_manager/apps/opt-app/variations/loud`, { args: { "--volume": "90", "--gain": "0.25" }, env: {}, priority: 10 }, "PUT")).status,
+    (
+      await postJson(
+        `${M}/api/_manager/apps/opt-app/variations/loud`,
+        { args: { "--volume": "90", "--gain": "0.25", "--repo": "robynhub/busybar-apps", "--size": "128 64" }, env: {}, priority: 10 },
+        "PUT"
+      )
+    ).status,
     200
   );
   assert.equal((await postJson(`${M}/api/_manager/apps/opt-app/variation`, { name: "loud" })).status, 200);
@@ -214,6 +254,12 @@ async function main() {
   assert.ok(
     lines.some((l) => l.includes("args volume=90 gain=0.25")),
     `slider values should reach the app, got: ${lines.join(" | ")}`
+  );
+  // "--size 128 64": a metavar naming two values is passed as two argv entries,
+  // the only form argparse accepts for nargs=2.
+  assert.ok(
+    lines.some((l) => l.includes("args repo=robynhub/busybar-apps size=128x64")),
+    `a slash metavar and a two-value option should reach the app, got: ${lines.join(" | ")}`
   );
 
   assert.equal((await fetchJson(`${M}/api/_manager/apps/opt-app/disable`, { method: "POST" })).status, 200);

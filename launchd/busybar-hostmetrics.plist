@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
 	<key>Label</key>
-	<string>nl.backspaced.busybar-hostmetrics</string>
+	<string>busybar-hostmetrics</string>
 	<key>ProgramArguments</key>
 	<array>
 		<string>__PYTHON__</string>

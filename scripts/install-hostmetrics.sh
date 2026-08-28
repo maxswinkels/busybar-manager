@@ -12,7 +12,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "$(dirname "$SCRIPT_DIR")" && pwd)"
 
-LABEL="nl.backspaced.busybar-hostmetrics"
+LABEL="busybar-hostmetrics"
 PORT="${BUSYBAR_HOST_METRICS_PORT:-8322}"
 # Loopback is enough for Docker Desktop, which proxies host.docker.internal
 # from the host side. Set 0.0.0.0 for a manager on another machine; the agent

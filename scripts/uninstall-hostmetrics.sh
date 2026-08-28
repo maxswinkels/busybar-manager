@@ -5,7 +5,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "$(dirname "$SCRIPT_DIR")" && pwd)"
 
-LABEL="nl.backspaced.busybar-hostmetrics"
+LABEL="busybar-hostmetrics"
 PLIST_DEST="$HOME/Library/LaunchAgents/$LABEL.plist"
 
 # Unload the service (suppress error if not loaded)

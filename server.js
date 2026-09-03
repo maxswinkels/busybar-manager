@@ -1542,7 +1542,8 @@ function forwardToBar(method, urlPath, reqHeaders, body) {
     const headers = barHeaders(reqHeaders);
     if (body && body.length) headers["content-length"] = String(body.length);
     else delete headers["content-length"];
-    const options = { hostname: up.hostname, port: up.port, path: up.path, method, headers, timeout: 10000 };
+    const timeout = urlPath.startsWith("/api/assets/upload") ? 120000 : 10000;
+    const options = { hostname: up.hostname, port: up.port, path: up.path, method, headers, timeout };
     const proxyReq = up.transport.request(options, (proxyRes) => {
       const chunks = [];
       proxyRes.on("data", (c) => chunks.push(c));
@@ -3262,9 +3263,12 @@ function readBody(req) {
   return new Promise((resolve, reject) => {
     const chunks = [];
     let size = 0;
+    const maxBodyBytes = req.url && req.url.startsWith("/api/assets/upload")
+      ? 64 * 1024 * 1024
+      : 8 * 1024 * 1024;
     req.on("data", (c) => {
       size += c.length;
-      if (size > 8 * 1024 * 1024) {
+      if (size > maxBodyBytes) {
         reject(new Error("payload too large"));
         req.destroy();
         return;

@@ -140,12 +140,17 @@ Run the installer once:
 ./scripts/install.sh
 ```
 
-It checks Node ≥22 + python3, builds the dashboard (`web/dist`), creates `logs/`, installs the LaunchAgent to `~/Library/LaunchAgents/nl.backspaced.busybar-manager.plist` (substituting the real node path + project dir), bootstraps it with `launchctl`, and starts it. After login the manager always runs and every enabled app starts in its chosen variation.
+It checks Node ≥22, python3 and the Xcode Command Line Tools, builds the dashboard (`web/dist`), and creates `~/Applications/BusyBar Manager.app`. The LaunchAgent starts that app after login. The app has no Dock icon: it starts and supervises the Node manager, then stays available through a macOS menu-bar icon. launchd restarts the app after a crash, but not after a clean Quit.
+
+The menu contains one action: **Quit**. It gracefully stops the manager and all managed apps, then removes the menu-bar icon. It stays stopped for the rest of that login session; double-click `~/Applications/BusyBar Manager.app` to start it again. The LaunchAgent starts it automatically after the next login.
 
 ```bash
 tail -f logs/manager.log logs/manager.err.log   # view logs
-./scripts/uninstall.sh                           # remove the LaunchAgent (project files stay)
+open "$HOME/Applications/BusyBar Manager.app"   # start it again after Quit
+./scripts/uninstall.sh                           # remove the app + LaunchAgent; project files stay
 ```
+
+The generated app records the absolute path of this checkout, matching the old LaunchAgent behavior. Run `scripts/install.sh` again after moving the repository or changing the Node installation.
 
 ## Docker
 
@@ -288,7 +293,7 @@ A zero-dependency end-to-end suite against a mock BUSY Bar + mock GitHub, coveri
 
 - **Node.js ≥ 22**
 - **python3**
-- **macOS** for autostart (the LaunchAgent is macOS-specific; the server itself is cross-platform)
+- **macOS 26+ + Xcode 26 Command Line Tools** for the menu-bar app and autostart (`xcode-select --install`; the server itself is cross-platform)
 - …or **Docker** — the compose setup ships both runtimes, see [Docker](#docker)
 - A **BUSY Bar** over USB-ethernet (default `10.0.4.20`) or Wi-Fi — or the [emulator](https://github.com/maxswinkels/busybar-emulator)
 

@@ -46,7 +46,7 @@ if [ -z "$MACOS_SDK" ] || [ ! -d "$MACOS_SDK" ]; then
 	echo "  xcode-select --install" >&2
 	exit 1
 fi
-MACOS_TARGET="$(/usr/bin/uname -m)-apple-macosx26.0"
+MACOS_TARGET="$(/usr/bin/uname -m)-apple-macosx13.0"
 
 # Build the dashboard: web/dist is not in git, so a fresh clone has nothing to
 # serve until Vite has run once. Rebuilding every install also keeps the bundle
@@ -113,6 +113,29 @@ make_icon 1024 icon_512x512@2x.png
 launchctl bootout "gui/$(id -u)/nl.backspaced.busybar-manager" 2>/dev/null || true
 if pgrep -x BusyBarManager >/dev/null 2>&1; then
 	/usr/bin/osascript -e 'tell application id "nl.backspaced.busybar-manager" to quit' 2>/dev/null || true
+fi
+
+# Give a previous instance time to exit before the port check below, so an
+# upgrade does not report its own manager as the conflict.
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+	pgrep -x BusyBarManager >/dev/null 2>&1 || break
+	sleep 1
+done
+
+# A port still taken at this point belongs to something else. The manager cannot
+# bind, so it would exit on every start and leave the launcher retrying in the
+# background. The Docker setup publishes this same port by default, which makes
+# running both the likely cause.
+LISTEN_PORT=$("$PYTHON_CMD" -c 'import json, sys
+try: print(json.load(open(sys.argv[1])).get("listenPort", 8321))
+except Exception: print(8321)' "$PROJECT_DIR/config.json" 2>/dev/null || echo 8321)
+if /usr/sbin/lsof -nP -iTCP:"$LISTEN_PORT" -sTCP:LISTEN >/dev/null 2>&1; then
+	PORT_HOLDER=$(/usr/sbin/lsof -nP -iTCP:"$LISTEN_PORT" -sTCP:LISTEN -Fc 2>/dev/null | /usr/bin/sed -n 's/^c//p' | /usr/bin/head -1)
+	echo "" >&2
+	echo "⚠ Poort $LISTEN_PORT is al in gebruik door: ${PORT_HOLDER:-onbekend}" >&2
+	echo "  De manager kan niet starten zolang die poort bezet is." >&2
+	echo "  Draai je de Docker-variant? Stop die eerst met: docker compose down" >&2
+	echo "" >&2
 fi
 
 mkdir -p "$(dirname "$APP_DEST")"

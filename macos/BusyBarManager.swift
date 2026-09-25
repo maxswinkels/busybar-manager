@@ -10,6 +10,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
   private var errorHandle: FileHandle?
   private var signalSources: [DispatchSourceSignal] = []
   private var quitting = false
+  private var statusMenuItem: NSMenuItem?
+  private var managerStartedAt: Date?
+  private var managerProcessGroup: pid_t?
+  private var restartDelay = AppDelegate.minimumRestartDelay
+
+  // launchd used to supervise Node itself and throttled respawns to its 10s
+  // minimum runtime. Supervising from here means owning that throttle: without
+  // it a Node that can never start (its port already taken by a container, say)
+  // respawns once a second for as long as the Mac is on.
+  private static let minimumRestartDelay: TimeInterval = 1
+  private static let maximumRestartDelay: TimeInterval = 60
+  private static let healthyRuntime: TimeInterval = 30
 
   private var projectDirectory: URL? {
     guard let path = Bundle.main.object(forInfoDictionaryKey: "BusyBarProjectDirectory") as? String,
@@ -49,7 +61,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     quitting = true
     restartWorkItem?.cancel()
 
-    guard let process = managerProcess, process.isRunning else { return .terminateNow }
+    let group = managerProcessGroup
+    managerProcessGroup = nil
+
+    guard let process = managerProcess, process.isRunning else {
+      Self.killGroup(group)
+      return .terminateNow
+    }
 
     process.terminate()
     DispatchQueue.global(qos: .utility).async {
@@ -58,9 +76,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Thread.sleep(forTimeInterval: 0.1)
       }
       if process.isRunning {
-        Darwin.kill(process.processIdentifier, SIGKILL)
+        if !Self.killGroup(group) {
+          Darwin.kill(process.processIdentifier, SIGKILL)
+        }
       }
       process.waitUntilExit()
+      // The direct child is a version-manager shim; sweep the server and the
+      // apps it spawned rather than leaving them orphaned.
+      _ = Self.killGroup(group)
       DispatchQueue.main.async {
         sender.reply(toApplicationShouldTerminate: true)
       }
@@ -70,22 +93,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
   private func installStatusItem() {
     let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
-    if let button = item.button {
-      if let image = NSImage(systemSymbolName: "display", accessibilityDescription: "BusyBar Manager") {
-        image.isTemplate = true
-        button.image = image
-      } else {
-        button.title = "B"
-      }
-      button.toolTip = "BusyBar Manager"
-    }
 
     let menu = NSMenu()
+    let state = NSMenuItem(title: "Starting\u{2026}", action: nil, keyEquivalent: "")
+    state.isEnabled = false
+    menu.addItem(state)
+    menu.addItem(.separator())
     let quitItem = NSMenuItem(title: "Quit", action: #selector(quit), keyEquivalent: "q")
     quitItem.target = self
     menu.addItem(quitItem)
     item.menu = menu
+
     statusItem = item
+    statusMenuItem = state
+    showStatus("Starting\u{2026}", healthy: true)
+  }
+
+  // A manager that never starts is otherwise invisible: the menu bar is the only
+  // place that failure surfaces without opening a log file.
+  private func showStatus(_ text: String, healthy: Bool) {
+    statusMenuItem?.title = text
+    guard let button = statusItem?.button else { return }
+    let symbol = healthy ? "display" : "display.trianglebadge.exclamationmark"
+    let image = NSImage(systemSymbolName: symbol, accessibilityDescription: "BusyBar Manager")
+      ?? NSImage(systemSymbolName: "display", accessibilityDescription: "BusyBar Manager")
+    if let image {
+      image.isTemplate = true
+      button.image = image
+      button.title = ""
+    } else {
+      button.image = nil
+      button.title = healthy ? "B" : "B!"
+    }
+    button.toolTip = "BusyBar Manager: \(text)"
   }
 
   private func installSignalHandlers() {
@@ -129,11 +169,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
       managerProcess = process
       try process.run()
+      managerStartedAt = Date()
+      managerProcessGroup = Self.processGroup(of: process)
+      showStatus("Running", healthy: true)
     } catch {
       managerProcess = nil
       closeLogHandles()
-      logLauncherError("Could not start busybar-manager: \(error)")
-      scheduleRestart()
+      scheduleRestart(reason: "could not start busybar-manager: \(error)")
     }
   }
 
@@ -141,14 +183,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     guard managerProcess === process else { return }
     managerProcess = nil
     closeLogHandles()
-    if !quitting {
-      logLauncherError("busybar-manager exited with status \(process.terminationStatus); restarting")
-      scheduleRestart()
+    let ranFor = managerStartedAt.map { Date().timeIntervalSince($0) } ?? 0
+    managerStartedAt = nil
+    // A shim killed outright leaves the real server running and still bound to
+    // the port, which would make every replacement fail to bind. Sweep the old
+    // process group before starting a new one.
+    _ = Self.killGroup(managerProcessGroup)
+    managerProcessGroup = nil
+    guard !quitting else { return }
+    if ranFor >= Self.healthyRuntime {
+      restartDelay = Self.minimumRestartDelay
     }
+    scheduleRestart(reason: "busybar-manager exited with status \(process.terminationStatus)")
   }
 
-  private func scheduleRestart() {
+  private func scheduleRestart(reason: String) {
     guard !quitting, restartWorkItem == nil else { return }
+    let delay = restartDelay
+    restartDelay = min(restartDelay * 2, Self.maximumRestartDelay)
+    logLauncherError("\(reason); restarting in \(Int(delay))s")
+    showStatus("Stopped, retrying in \(Int(delay))s", healthy: false)
     let workItem = DispatchWorkItem { [weak self] in
       guard let self else { return }
       self.restartWorkItem = nil
@@ -162,7 +216,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
       )
     }
     restartWorkItem = workItem
-    DispatchQueue.main.asyncAfter(deadline: .now() + 1, execute: workItem)
+    DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: workItem)
+  }
+
+  // Node is usually reached through a version-manager shim (Volta, asdf, nvm),
+  // so the real server is a grandchild and the apps it spawns sit below that.
+  // Process gives the child its own process group, so signalling the group takes
+  // the whole tree. Only a group the child leads is safe to signal: anything else
+  // could be this app's own group.
+  private static func processGroup(of process: Process) -> pid_t? {
+    let pid = process.processIdentifier
+    return getpgid(pid) == pid ? pid : nil
+  }
+
+  @discardableResult
+  private static func killGroup(_ group: pid_t?) -> Bool {
+    guard let group, group > 1 else { return false }
+    Darwin.kill(-group, SIGKILL)
+    return true
   }
 
   private func logHandle(at url: URL) throws -> FileHandle {

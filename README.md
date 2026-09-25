@@ -142,7 +142,9 @@ Run the installer once:
 
 It checks Node ≥22, python3 and the Xcode Command Line Tools, builds the dashboard (`web/dist`), and creates `~/Applications/BusyBar Manager.app`. The LaunchAgent starts that app after login. The app has no Dock icon: it starts and supervises the Node manager, then stays available through a macOS menu-bar icon. launchd restarts the app after a crash, but not after a clean Quit.
 
-The menu contains one action: **Quit**. It gracefully stops the manager and all managed apps, then removes the menu-bar icon. It stays stopped for the rest of that login session; double-click `~/Applications/BusyBar Manager.app` to start it again. The LaunchAgent starts it automatically after the next login.
+The menu shows the manager's state and one action: **Quit**. Quit gracefully stops the manager and all managed apps, then removes the menu-bar icon. It stays stopped for the rest of that login session; double-click `~/Applications/BusyBar Manager.app` to start it again. The LaunchAgent starts it automatically after the next login.
+
+If the manager itself stops, the app restarts it with an exponential backoff of 1s up to 60s, and the menu-bar icon gains a warning badge showing when the next attempt is. A manager that stays up for 30 seconds resets the backoff. The usual cause of a manager that never starts is a `listenPort` already taken by something else, typically the [Docker](#docker) setup publishing the same port; `scripts/install.sh` warns about that up front.
 
 ```bash
 tail -f logs/manager.log logs/manager.err.log   # view logs

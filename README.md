@@ -147,7 +147,7 @@ The icon is the BUSY wordmark, drawn as a template image so it follows the menu 
 | Item | What it does |
 | --- | --- |
 | **Open Dashboard** | Opens `http://127.0.0.1:<listenPort>` in the default browser. Disabled while the manager is down. |
-| *Showing: …* | Which app currently owns the bar, read from the manager when the menu opens. Turns into the failure reason when the manager is not running. |
+| *Showing: …* | Which app is on the bar: an app that has taken the screen if there is one, otherwise the running app that drew most recently. Refreshes while the menu is open. Reads *Checking the bar…* until the manager answers, and turns into the failure reason when it is not running. |
 | **Restart Manager** | Stops Node gracefully and starts it again, without quitting the app. Reads **Start Manager Now** while the manager is down, which skips the remaining backoff. |
 | **Open Logs** | Opens `logs/manager.log`. |
 | **Quit** | Gracefully stops the manager and all managed apps, then removes the menu-bar icon. |

@@ -9,6 +9,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     case retrying(seconds: Int)
   }
 
+  // "Nobody is on the bar" and "the manager did not answer" look identical at
+  // the call site, so they are kept apart here: only the manager's own answer
+  // may claim the bar is empty.
+  private enum ScreenOwner {
+    case unknown
+    case idle
+    case app(String)
+
+    var title: String {
+      switch self {
+      case .unknown: return "Checking the bar\u{2026}"
+      case .idle: return "Nothing on the bar"
+      case .app(let name): return "Showing: \(name)"
+      }
+    }
+  }
+
   private var statusItem: NSStatusItem?
   private var dashboardItem: NSMenuItem?
   private var infoItem: NSMenuItem?
@@ -24,6 +41,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
   private var restartRequested = false
   private var restartDelay = AppDelegate.minimumRestartDelay
   private var state: ManagerState = .starting
+  private var screenOwner: ScreenOwner = .unknown
+  private var menuIsOpen = false
 
   // launchd used to supervise Node itself and throttled respawns to its 10s
   // minimum runtime. Supervising from here means owning that throttle: without
@@ -192,7 +211,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
   }
 
   func menuWillOpen(_ menu: NSMenu) {
+    menuIsOpen = true
+    pollWhileMenuOpen()
+  }
+
+  func menuDidClose(_ menu: NSMenu) {
+    menuIsOpen = false
+  }
+
+  // An open menu runs in its own run loop mode that a Timer scheduled in
+  // .common does not reach, so the poll rides the main dispatch queue, which
+  // drains in every mode.
+  private func pollWhileMenuOpen() {
+    guard menuIsOpen else { return }
     refreshScreenOwner()
+    DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
+      self?.pollWhileMenuOpen()
+    }
+  }
+
+  // The server binds a second or two after the process starts, so the first
+  // ask usually finds nobody home. Keep asking until it answers rather than
+  // leaving a stale line until the user opens the menu again.
+  private func settleScreenOwner(attempts: Int) {
+    guard attempts > 0 else { return }
+    DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
+      guard let self, case .running = self.state else { return }
+      self.refreshScreenOwner { [weak self] result in
+        if case .unknown = result {
+          self?.settleScreenOwner(attempts: attempts - 1)
+        }
+      }
+    }
   }
 
   private func apply(state newState: ManagerState) {
@@ -203,10 +253,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
       infoItem?.title = "Starting\u{2026}"
       running = false
     case .running:
-      // Replaced by the real answer as soon as the manager reports one.
-      infoItem?.title = "Showing: \u{2026}"
+      screenOwner = .unknown
+      infoItem?.title = screenOwner.title
       running = true
-      refreshScreenOwner()
+      settleScreenOwner(attempts: 8)
     case .retrying(let seconds):
       infoItem?.title = "Stopped, retrying in \(seconds)s"
       running = false
@@ -221,23 +271,61 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
   // Asked for when the menu opens rather than polled: nothing reads this while
   // the menu is shut.
-  private func refreshScreenOwner() {
+  private func refreshScreenOwner(completion: ((ScreenOwner) -> Void)? = nil) {
     guard case .running = state, let base = dashboardURL else { return }
     var request = URLRequest(url: base.appendingPathComponent("api/_manager/state"))
     request.timeoutInterval = 2
-    URLSession.shared.dataTask(with: request) { [weak self] data, _, _ in
-      var owner: String?
-      if let data,
-         let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-         let screenOwner = json["screenOwner"] as? [String: Any] {
-        owner = screenOwner["applicationName"] as? String ?? screenOwner["slug"] as? String
+    URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
+      let result: ScreenOwner
+      if error != nil
+        || (response as? HTTPURLResponse)?.statusCode != 200
+        || data == nil {
+        // No answer is not an answer: say so instead of claiming an empty bar.
+        result = .unknown
+      } else if let data, let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+        result = Self.readScreenOwner(from: json)
+      } else {
+        result = .unknown
       }
       DispatchQueue.main.async {
         guard let self, case .running = self.state else { return }
-        self.infoItem?.title = owner.map { "Showing: \($0)" } ?? "Nothing on the bar"
-        self.statusItem?.button?.toolTip = "BusyBar Manager: \(self.infoItem?.title ?? "")"
+        self.screenOwner = result
+        self.infoItem?.title = result.title
+        self.statusItem?.button?.toolTip = "BusyBar Manager: \(result.title)"
+        completion?(result)
       }
     }.resume()
+  }
+
+  // screenOwner only names an app that has taken the whole screen, so an app
+  // that is merely drawing leaves it null. Reporting that as an empty bar is
+  // wrong: fall back to whichever running app drew most recently.
+  private static func readScreenOwner(from json: [String: Any]) -> ScreenOwner {
+    let apps = json["apps"] as? [[String: Any]] ?? []
+
+    func label(for app: [String: Any]) -> String? {
+      app["name"] as? String ?? app["slug"] as? String
+    }
+
+    if let owner = json["screenOwner"] as? [String: Any] {
+      let slug = owner["slug"] as? String
+      let match = apps.first { $0["slug"] as? String == slug }
+      if let name = match.flatMap(label) ?? owner["applicationName"] as? String ?? slug {
+        return .app(name)
+      }
+    }
+
+    let running = apps.filter { ($0["status"] as? String) == "running" }
+    let latest = running.max { lastDraw(of: $0) < lastDraw(of: $1) }
+    if let latest, let name = label(for: latest) {
+      return .app(name)
+    }
+    return .idle
+  }
+
+  private static func lastDraw(of app: [String: Any]) -> Double {
+    guard let draw = app["lastDraw"] as? [String: Any] else { return 0 }
+    return (draw["ts"] as? NSNumber)?.doubleValue ?? 0
   }
 
   // MARK: - Actions

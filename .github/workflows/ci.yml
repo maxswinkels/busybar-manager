@@ -42,7 +42,7 @@ jobs:
       - name: Type-check the native launcher
         run: |
           swiftc -warnings-as-errors \
-            -target "$(uname -m)-apple-macosx26.0" \
+            -target "$(uname -m)-apple-macosx13.0" \
             -sdk "$(xcrun --sdk macosx --show-sdk-path)" \
             -typecheck -framework AppKit macos/BusyBarManager.swift
 

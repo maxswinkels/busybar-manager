@@ -88,8 +88,11 @@ echo "macOS-app bouwen..."
 	"$PROJECT_DIR/macos/BusyBarManager.swift" \
 	-o "$CONTENTS/MacOS/BusyBarManager"
 
-# Reuse the dashboard favicon for the Finder app icon. The status-bar icon is
-# a monochrome system symbol rendered by AppKit.
+# The menu-bar wordmark ships as a vector: AppKit renders it as a template
+# image, so one asset covers light and dark mode at any scale.
+cp "$PROJECT_DIR/macos/StatusIcon.svg" "$CONTENTS/Resources/StatusIcon.svg"
+
+# Reuse the dashboard favicon for the Finder app icon.
 ICONSET="$APP_STAGE_ROOT/AppIcon.iconset"
 mkdir -p "$ICONSET"
 make_icon() {

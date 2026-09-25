@@ -2,18 +2,28 @@ import AppKit
 import Darwin
 import Foundation
 
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
+  private enum ManagerState {
+    case starting
+    case running
+    case retrying(seconds: Int)
+  }
+
   private var statusItem: NSStatusItem?
+  private var dashboardItem: NSMenuItem?
+  private var infoItem: NSMenuItem?
+  private var restartItem: NSMenuItem?
   private var managerProcess: Process?
   private var restartWorkItem: DispatchWorkItem?
   private var outputHandle: FileHandle?
   private var errorHandle: FileHandle?
   private var signalSources: [DispatchSourceSignal] = []
   private var quitting = false
-  private var statusMenuItem: NSMenuItem?
   private var managerStartedAt: Date?
   private var managerProcessGroup: pid_t?
+  private var restartRequested = false
   private var restartDelay = AppDelegate.minimumRestartDelay
+  private var state: ManagerState = .starting
 
   // launchd used to supervise Node itself and throttled respawns to its 10s
   // minimum runtime. Supervising from here means owning that throttle: without
@@ -22,6 +32,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
   private static let minimumRestartDelay: TimeInterval = 1
   private static let maximumRestartDelay: TimeInterval = 60
   private static let healthyRuntime: TimeInterval = 30
+  private static let defaultListenPort = 8321
+  // The wordmark is four times wider than it is tall, so it is sized by height.
+  private static let statusIconHeight: CGFloat = 14
 
   private var projectDirectory: URL? {
     guard let path = Bundle.main.object(forInfoDictionaryKey: "BusyBarProjectDirectory") as? String,
@@ -39,6 +52,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     guard let path = Bundle.main.object(forInfoDictionaryKey: "BusyBarPythonExecutable") as? String,
           !path.isEmpty else { return nil }
     return URL(fileURLWithPath: path)
+  }
+
+  // Mirrors how server.js resolves its config, so the dashboard link keeps
+  // working after the port is changed there.
+  private var configURL: URL? {
+    let environment = ProcessInfo.processInfo.environment
+    if let path = environment["BUSYBAR_MANAGER_CONFIG"], !path.isEmpty {
+      return URL(fileURLWithPath: path)
+    }
+    return projectDirectory?.appendingPathComponent("config.json")
+  }
+
+  private var dashboardURL: URL? {
+    var port = Self.defaultListenPort
+    if let raw = ProcessInfo.processInfo.environment["PORT"], let value = Int(raw), value > 0 {
+      port = value
+    } else if let configURL,
+              let data = try? Data(contentsOf: configURL),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let value = json["listenPort"] as? Int, value > 0 {
+      port = value
+    }
+    return URL(string: "http://127.0.0.1:\(port)")
   }
 
   func applicationDidFinishLaunching(_ notification: Notification) {
@@ -91,42 +127,152 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     return .terminateLater
   }
 
+  // MARK: - Menu
+
   private func installStatusItem() {
-    let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+    let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
 
     let menu = NSMenu()
-    let state = NSMenuItem(title: "Starting\u{2026}", action: nil, keyEquivalent: "")
-    state.isEnabled = false
-    menu.addItem(state)
+    menu.delegate = self
+    // Without this AppKit decides enablement from the responder chain and
+    // overrides the state set below, leaving a dead dashboard link clickable.
+    menu.autoenablesItems = false
+
+    let dashboard = NSMenuItem(title: "Open Dashboard", action: #selector(openDashboard), keyEquivalent: "d")
+    dashboard.target = self
+    menu.addItem(dashboard)
     menu.addItem(.separator())
+
+    // One line that answers "what is the bar doing?" while healthy, and turns
+    // into the failure reason when it is not. There is no idle "Running" label:
+    // a state that is always true tells the reader nothing.
+    let info = NSMenuItem(title: "Starting\u{2026}", action: nil, keyEquivalent: "")
+    info.isEnabled = false
+    menu.addItem(info)
+    menu.addItem(.separator())
+
+    let restart = NSMenuItem(title: "Restart Manager", action: #selector(restartManager), keyEquivalent: "r")
+    restart.target = self
+    menu.addItem(restart)
+
+    let logs = NSMenuItem(title: "Open Logs", action: #selector(openLogs), keyEquivalent: "l")
+    logs.target = self
+    menu.addItem(logs)
+    menu.addItem(.separator())
+
     let quitItem = NSMenuItem(title: "Quit", action: #selector(quit), keyEquivalent: "q")
     quitItem.target = self
     menu.addItem(quitItem)
+
     item.menu = menu
+    item.button?.image = Self.statusIcon()
+    item.button?.imagePosition = .imageOnly
+    if item.button?.image == nil {
+      item.button?.title = "BUSY"
+    }
 
     statusItem = item
-    statusMenuItem = state
-    showStatus("Starting\u{2026}", healthy: true)
+    dashboardItem = dashboard
+    infoItem = info
+    restartItem = restart
+    apply(state: .starting)
   }
 
-  // A manager that never starts is otherwise invisible: the menu bar is the only
-  // place that failure surfaces without opening a log file.
-  private func showStatus(_ text: String, healthy: Bool) {
-    statusMenuItem?.title = text
-    guard let button = statusItem?.button else { return }
-    let symbol = healthy ? "display" : "display.trianglebadge.exclamationmark"
-    let image = NSImage(systemSymbolName: symbol, accessibilityDescription: "BusyBar Manager")
-      ?? NSImage(systemSymbolName: "display", accessibilityDescription: "BusyBar Manager")
-    if let image {
-      image.isTemplate = true
-      button.image = image
-      button.title = ""
-    } else {
-      button.image = nil
-      button.title = healthy ? "B" : "B!"
-    }
-    button.toolTip = "BusyBar Manager: \(text)"
+  // The BUSY wordmark, shipped as a vector next to the binary. AppKit renders a
+  // template image from its alpha channel alone, so it follows the menu bar in
+  // light and dark mode without a second asset.
+  private static func statusIcon() -> NSImage? {
+    guard let url = Bundle.main.url(forResource: "StatusIcon", withExtension: "svg"),
+          let image = NSImage(contentsOf: url), image.size.height > 0 else { return nil }
+    let width = (image.size.width / image.size.height * statusIconHeight).rounded()
+    image.size = NSSize(width: width, height: statusIconHeight)
+    image.isTemplate = true
+    image.accessibilityDescription = "BusyBar Manager"
+    return image
   }
+
+  func menuWillOpen(_ menu: NSMenu) {
+    refreshScreenOwner()
+  }
+
+  private func apply(state newState: ManagerState) {
+    state = newState
+    let running: Bool
+    switch newState {
+    case .starting:
+      infoItem?.title = "Starting\u{2026}"
+      running = false
+    case .running:
+      // Replaced by the real answer as soon as the manager reports one.
+      infoItem?.title = "Showing: \u{2026}"
+      running = true
+      refreshScreenOwner()
+    case .retrying(let seconds):
+      infoItem?.title = "Stopped, retrying in \(seconds)s"
+      running = false
+    }
+
+    dashboardItem?.isEnabled = running
+    restartItem?.title = running ? "Restart Manager" : "Start Manager Now"
+    // A faded wordmark is the only signal a healthy Mac ever needs to show.
+    statusItem?.button?.appearsDisabled = !running
+    statusItem?.button?.toolTip = "BusyBar Manager: \(infoItem?.title ?? "")"
+  }
+
+  // Asked for when the menu opens rather than polled: nothing reads this while
+  // the menu is shut.
+  private func refreshScreenOwner() {
+    guard case .running = state, let base = dashboardURL else { return }
+    var request = URLRequest(url: base.appendingPathComponent("api/_manager/state"))
+    request.timeoutInterval = 2
+    URLSession.shared.dataTask(with: request) { [weak self] data, _, _ in
+      var owner: String?
+      if let data,
+         let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+         let screenOwner = json["screenOwner"] as? [String: Any] {
+        owner = screenOwner["applicationName"] as? String ?? screenOwner["slug"] as? String
+      }
+      DispatchQueue.main.async {
+        guard let self, case .running = self.state else { return }
+        self.infoItem?.title = owner.map { "Showing: \($0)" } ?? "Nothing on the bar"
+        self.statusItem?.button?.toolTip = "BusyBar Manager: \(self.infoItem?.title ?? "")"
+      }
+    }.resume()
+  }
+
+  // MARK: - Actions
+
+  @objc private func openDashboard() {
+    guard let dashboardURL else { return }
+    NSWorkspace.shared.open(dashboardURL)
+  }
+
+  @objc private func openLogs() {
+    guard let projectDirectory else { return }
+    NSWorkspace.shared.open(projectDirectory.appendingPathComponent("logs/manager.log"))
+  }
+
+  @objc private func restartManager() {
+    guard !quitting else { return }
+    // A restart the user asked for should not inherit a crash loop's penalty.
+    restartDelay = Self.minimumRestartDelay
+
+    guard let process = managerProcess, process.isRunning else {
+      restartWorkItem?.cancel()
+      restartWorkItem = nil
+      startManagerIfPossible()
+      return
+    }
+
+    restartRequested = true
+    process.terminate()
+  }
+
+  @objc private func quit() {
+    NSApp.terminate(nil)
+  }
+
+  // MARK: - Supervision
 
   private func installSignalHandlers() {
     for signalNumber in [SIGINT, SIGTERM] {
@@ -136,6 +282,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
       source.resume()
       signalSources.append(source)
     }
+  }
+
+  private func startManagerIfPossible() {
+    guard let projectDirectory, let nodeExecutable, let pythonExecutable else { return }
+    startManager(projectDirectory: projectDirectory, nodeExecutable: nodeExecutable, pythonExecutable: pythonExecutable)
   }
 
   private func startManager(projectDirectory: URL, nodeExecutable: URL, pythonExecutable: URL) {
@@ -171,7 +322,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
       try process.run()
       managerStartedAt = Date()
       managerProcessGroup = Self.processGroup(of: process)
-      showStatus("Running", healthy: true)
+      apply(state: .running)
     } catch {
       managerProcess = nil
       closeLogHandles()
@@ -194,7 +345,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     if ranFor >= Self.healthyRuntime {
       restartDelay = Self.minimumRestartDelay
     }
-    scheduleRestart(reason: "busybar-manager exited with status \(process.terminationStatus)")
+    let reason = restartRequested
+      ? "restart requested from the menu"
+      : "busybar-manager exited with status \(process.terminationStatus)"
+    restartRequested = false
+    scheduleRestart(reason: reason)
   }
 
   private func scheduleRestart(reason: String) {
@@ -202,18 +357,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let delay = restartDelay
     restartDelay = min(restartDelay * 2, Self.maximumRestartDelay)
     logLauncherError("\(reason); restarting in \(Int(delay))s")
-    showStatus("Stopped, retrying in \(Int(delay))s", healthy: false)
+    apply(state: .retrying(seconds: Int(delay)))
     let workItem = DispatchWorkItem { [weak self] in
       guard let self else { return }
       self.restartWorkItem = nil
-      guard let projectDirectory = self.projectDirectory,
-            let nodeExecutable = self.nodeExecutable,
-            let pythonExecutable = self.pythonExecutable else { return }
-      self.startManager(
-        projectDirectory: projectDirectory,
-        nodeExecutable: nodeExecutable,
-        pythonExecutable: pythonExecutable
-      )
+      self.startManagerIfPossible()
     }
     restartWorkItem = workItem
     DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: workItem)
@@ -235,6 +383,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     Darwin.kill(-group, SIGKILL)
     return true
   }
+
+  // MARK: - Logging
 
   private func logHandle(at url: URL) throws -> FileHandle {
     if !FileManager.default.fileExists(atPath: url.path) {
@@ -274,10 +424,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     alert.informativeText = message
     alert.addButton(withTitle: "Quit")
     alert.runModal()
-    NSApp.terminate(nil)
-  }
-
-  @objc private func quit() {
     NSApp.terminate(nil)
   }
 }

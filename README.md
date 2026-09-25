@@ -142,9 +142,19 @@ Run the installer once:
 
 It checks Node ≥22, python3 and the Xcode Command Line Tools, builds the dashboard (`web/dist`), and creates `~/Applications/BusyBar Manager.app`. The LaunchAgent starts that app after login. The app has no Dock icon: it starts and supervises the Node manager, then stays available through a macOS menu-bar icon. launchd restarts the app after a crash, but not after a clean Quit.
 
-The menu shows the manager's state and one action: **Quit**. Quit gracefully stops the manager and all managed apps, then removes the menu-bar icon. It stays stopped for the rest of that login session; double-click `~/Applications/BusyBar Manager.app` to start it again. The LaunchAgent starts it automatically after the next login.
+The icon is the BUSY wordmark, drawn as a template image so it follows the menu bar in light and dark mode. Clicking it opens:
 
-If the manager itself stops, the app restarts it with an exponential backoff of 1s up to 60s, and the menu-bar icon gains a warning badge showing when the next attempt is. A manager that stays up for 30 seconds resets the backoff. The usual cause of a manager that never starts is a `listenPort` already taken by something else, typically the [Docker](#docker) setup publishing the same port; `scripts/install.sh` warns about that up front.
+| Item | What it does |
+| --- | --- |
+| **Open Dashboard** | Opens `http://127.0.0.1:<listenPort>` in the default browser. Disabled while the manager is down. |
+| *Showing: …* | Which app currently owns the bar, read from the manager when the menu opens. Turns into the failure reason when the manager is not running. |
+| **Restart Manager** | Stops Node gracefully and starts it again, without quitting the app. Reads **Start Manager Now** while the manager is down, which skips the remaining backoff. |
+| **Open Logs** | Opens `logs/manager.log`. |
+| **Quit** | Gracefully stops the manager and all managed apps, then removes the menu-bar icon. |
+
+There is deliberately no idle "Running" line: while everything works the menu answers what is on the bar instead. After Quit the manager stays stopped for the rest of that login session; double-click `~/Applications/BusyBar Manager.app` to start it again. The LaunchAgent starts it automatically after the next login.
+
+If the manager itself stops, the app restarts it with an exponential backoff of 1s up to 60s, the icon fades, and the menu says when the next attempt is. A manager that stays up for 30 seconds resets the backoff. The usual cause of a manager that never starts is a `listenPort` already taken by something else, typically the [Docker](#docker) setup publishing the same port; `scripts/install.sh` warns about that up front.
 
 ```bash
 tail -f logs/manager.log logs/manager.err.log   # view logs

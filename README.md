@@ -295,7 +295,7 @@ A zero-dependency end-to-end suite against a mock BUSY Bar + mock GitHub, coveri
 
 - **Node.js ≥ 22**
 - **python3**
-- **macOS 26+ + Xcode 26 Command Line Tools** for the menu-bar app and autostart (`xcode-select --install`; the server itself is cross-platform)
+- **macOS 13+ + Xcode Command Line Tools** for the menu-bar app and autostart (`xcode-select --install`; the server itself is cross-platform)
 - …or **Docker** — the compose setup ships both runtimes, see [Docker](#docker)
 - A **BUSY Bar** over USB-ethernet (default `10.0.4.20`) or Wi-Fi — or the [emulator](https://github.com/maxswinkels/busybar-emulator)
 

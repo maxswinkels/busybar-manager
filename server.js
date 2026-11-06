@@ -1835,10 +1835,10 @@ async function githubRawFetch(url, timeoutMs) {
 }
 
 // Two API calls total per repo: branch -> commit sha, then the recursive
-// tree at that commit. Only paths under apps/<slug>/ (one level deep —
-// runtime files sit flat in the app folder) are relevant. preview.* and
-// dotfiles are tracked separately (for previewUrl) and excluded from the
-// installable file set.
+// tree at that commit. Only paths under apps/<slug>/ (at any depth — an app
+// may ship a package folder) are relevant. The root preview.* and dotfiles
+// are tracked separately (for previewUrl) and excluded from the installable
+// file set.
 async function performRepoCheck(repo, branch) {
   const branchInfo = await githubJson(`${libraryApiBase()}/repos/${repo}/branches/${encodeURIComponent(branch)}`);
   const commitSha = branchInfo && branchInfo.commit && branchInfo.commit.sha;
@@ -1849,15 +1849,19 @@ async function performRepoCheck(repo, branch) {
   const bySlug = {}; // slug -> { files: {rel: sha}, previewFile: string|null }
   for (const item of tree) {
     if (item.type !== "blob") continue;
-    const m = item.path.match(/^apps\/([^/]+)\/([^/]+)$/); // flat files directly under apps/<slug>/
+    const m = item.path.match(/^apps\/([^/]+)\/(.+)$/); // files anywhere under apps/<slug>/ (file = path relative to the app folder)
     if (!m) continue;
     const [, slug, file] = m;
     if (!bySlug[slug]) bySlug[slug] = { files: {}, previewFile: null };
     // Dotfiles are repo cruft and stay out of the install set, except the
     // env template: the dashboard needs it to know which env vars the app
-    // reads (see discoverEnvSpec).
-    if ((file.startsWith(".") && !ENV_EXAMPLE_NAMES.includes(file)) || file.startsWith("__pycache__")) continue;
-    if (/^preview\./i.test(file)) {
+    // reads (see discoverEnvSpec). __pycache__ is skipped in any path segment.
+    const segs = file.split("/");
+    if (segs.some((s) => s.startsWith(".") && !(segs.length === 1 && ENV_EXAMPLE_NAMES.includes(s)))) continue;
+    if (segs.includes("__pycache__") || file.startsWith("__pycache__")) continue;
+    // Only a preview.* at the app root is the preview image; a nested one is
+    // source (e.g. fui/preview.py) and must be installed.
+    if (segs.length === 1 && /^preview\./i.test(file)) {
       bySlug[slug].previewFile = file;
       continue;
     }
@@ -2026,7 +2030,9 @@ async function deployLibraryApp(slug, catEntry, commitSha, repo, branch) {
   try {
     for (const file of Object.keys(catEntry.files)) {
       const buf = await downloadLibraryFile(repo, commitSha, slug, file);
-      fs.writeFileSync(path.join(stagingDir, file), buf);
+      const dest = path.join(stagingDir, file);
+      fs.mkdirSync(path.dirname(dest), { recursive: true }); // library files can sit in subfolders (fui/cli.py)
+      fs.writeFileSync(dest, buf);
     }
     const stamp = {
       repo, branch, commit: commitSha,
